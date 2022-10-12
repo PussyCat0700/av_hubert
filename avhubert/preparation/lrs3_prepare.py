@@ -22,6 +22,14 @@ def read_csv(csv_file, delimit=','):
     return df
 
 def make_short_manifest(pretrain_dir, output_fn):
+    """
+    Target: txt files in pretrain dir
+    Output: csv file with columns id, text, start, end
+    Description:
+    Merge words into longer texts of pretrain(if gap between words <= min_interval = 0.4),
+    and make a csv file that specifies fid, text, start, end for each text.
+    Note that the boundaries between merged words(texts) are average-smoothed based on marginal words on both ends.
+    """
     subdirs = os.listdir(pretrain_dir)
     min_interval = 0.4
     max_duration = 15
@@ -32,21 +40,34 @@ def make_short_manifest(pretrain_dir, output_fn):
             fid = os.path.relpath(txt_fn, pretrain_dir)[:-4]
             lns = open(txt_fn).readlines()
             raw_text = lns[0].strip().split(':')[-1].strip()
-            conf = lns[1].strip().split(':')[-1].strip()
+            conf = lns[1].strip().split(':')[-1].strip()  # unused
             word_intervals = []
+            """
+            find which line starts the column heads WORD, START, END, ASDSCORE in dataset.
+            """
             for i_line, ln in enumerate(lns):
                 if ln[:4] == 'WORD':
                     start_index = i_line
                     break
+            """
+            Keep record of useful information along the lines for every word.
+            """
             for ln in lns[start_index+1:]:
                 word, start, end, score = ln.strip().split()
                 word_intervals.append([word, float(start), float(end)])
+            """
+            If the last word ends after max_duration = 15, return the whole text in this text file.
+            """
             if word_intervals[-1][-1] < max_duration:
                 df['fid'].append(fid)
                 df['sent'].append(raw_text)
                 df['start'].append(0)
                 df['end'].append(-1)
                 continue
+            """
+            If not, merge words into longer text if possible.
+            list of words(word_intervals) -> list of merged words or text(sents, abbv for sentences)
+            """
             sents, cur_sent = [], []
             for i_word, (word, start, end) in enumerate(word_intervals):
                 if i_word == 0:
@@ -60,6 +81,10 @@ def make_short_manifest(pretrain_dir, output_fn):
                         cur_sent.append([word, start, end])
             if len(cur_sent) > 0:
                 sents.append(cur_sent)
+            """
+            Boudary averaging for sents.
+            This leaves df a record of merged words with smoothed boundary.
+            """
             for i_sent, sent in enumerate(sents):
                 df['fid'].append(fid+'_'+str(i_sent))
                 sent_words = ' '.join([x[0] for x in sent])
@@ -79,6 +104,12 @@ def make_short_manifest(pretrain_dir, output_fn):
     print(f"Percentage of >15 second: {100*num_long/len(durations)}%")
     num_long = len(list(filter(lambda x: x > 20, durations)))
     print(f"Percentage of >20 second: {100*num_long/len(durations)}%")
+    """
+    csv format:
+    fid = id corresponding to folder + index number in sents.
+    start = smoothed start time
+    end = smoothed end time
+    """
     with open(output_fn, 'w') as fo:
         fo.write('id,text,start,end\n')
         for i in range(len(df['fid'])):
@@ -164,16 +195,16 @@ def trim_audio(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
         shutil.rmtree(tmp_dir)
     return
 
-def trim_pretrain(root_dir, ffmpeg, rank=0, nshard=1, step=1):
+def trim_pretrain(root_dir, out_dir, ffmpeg, rank=0, nshard=1, step=1):
     pretrain_dir = os.path.join(root_dir, 'pretrain')
     print(f"Trim original videos in pretrain")
-    csv_fn = os.path.join(root_dir, 'short-pretrain.csv')
+    csv_fn = os.path.join(out_dir, 'short-pretrain.csv')
     if step == 1:
         print(f"Step 1. Make csv file {csv_fn}")
         make_short_manifest(pretrain_dir, csv_fn)
     else:
         print(f"Step 2. Trim video and audio")
-        output_video_dir, output_audio_dir = os.path.join(root_dir, 'short-pretrain'), os.path.join(root_dir, 'audio/short-pretrain/')
+        output_video_dir, output_audio_dir = os.path.join(out_dir, 'short-pretrain'), os.path.join(out_dir, 'audio/short-pretrain/')
         os.makedirs(output_video_dir, exist_ok=True)
         os.makedirs(output_audio_dir, exist_ok=True)
         trim_video_frame(csv_fn, pretrain_dir, output_video_dir, ffmpeg, rank, nshard)
@@ -226,13 +257,14 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='LRS3 preprocess pretrain dir', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--lrs3', type=str, help='lrs3 root dir')
+    parser.add_argument('--output', type=str, help='output dir')
     parser.add_argument('--ffmpeg', type=str, help='path to ffmpeg')
     parser.add_argument('--rank', type=int, help='rank id')
     parser.add_argument('--nshard', type=int, help='number of shards')
     parser.add_argument('--step', type=int, help='Steps (1: split labels, 2: trim video/audio, 3: prep audio for trainval/test, 4: get labels and file list)')
     args = parser.parse_args()
     if args.step <= 2:
-        trim_pretrain(args.lrs3, args.ffmpeg, args.rank, args.nshard, step=args.step)
+        trim_pretrain(args.lrs3, args.output, args.ffmpeg, args.rank, args.nshard, step=args.step)
     elif args.step == 3:
         print(f"Extracting audio for trainval/test")
         prep_wav(args.lrs3, args.ffmpeg, args.rank, args.nshard)
