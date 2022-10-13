@@ -106,7 +106,8 @@ def make_short_manifest(pretrain_dir, output_fn):
     print(f"Percentage of >20 second: {100*num_long/len(durations)}%")
     """
     csv format:
-    fid = id corresponding to folder + index number in sents.
+    fid = sample id + index number in sents.
+    (so multiple fids correspond to one id only, as fids were derived from sample id.)
     start = smoothed start time
     end = smoothed end time
     """
@@ -116,12 +117,24 @@ def make_short_manifest(pretrain_dir, output_fn):
             fo.write(','.join([df['fid'][i], df['sent'][i], '%.3f' % (df['start'][i]), '%.3f' % (df['end'][i])])+'\n')
     return
 
-def trim_video_frame(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
+def get_ffmpeg_path(ffmpeg):
+    return 'ffmpeg' if ffmpeg is None else ffmpeg
+
+def get_raw2fid(csv_fn):
     df = read_csv(csv_fn)
     raw2fid = OrderedDict()
-    decimal, fps = 9, 25
+    """
+    raw2fid:
+    size:the number of utterances in LRS3(118516)
+    keys:(sample id, aka original(raw) fids)
+    values:(list of (fid, start, end) corresponding to sample id)
+    """
     for fid, start, end in zip(df['id'], df['start'], df['end']):
         if '_' in fid:
+            """
+            raw_fid = original folder which fid belongs to.
+            eg:00001_02(fid)->00001(raw_fid).
+            """
             raw_fid = '_'.join(fid.split('_')[:-1])
         else:
             raw_fid = fid
@@ -129,13 +142,37 @@ def trim_video_frame(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
             raw2fid[raw_fid].append([fid, start, end])
         else:
             raw2fid[raw_fid] = [[fid, start, end]]
-    i_raw = -1
+    return raw2fid
+
+def trim_video_frame(csv_fn, raw_dir, output_dir, ffmpeg, nshard):
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor()
+    ffmpeg = get_ffmpeg_path(ffmpeg)
+    raw2fid = get_raw2fid(csv_fn)
     num_per_shard = math.ceil(len(raw2fid.keys())/nshard)
-    start_id, end_id = num_per_shard*rank, num_per_shard*(rank+1)
-    fid_info_shard = list(raw2fid.items())[start_id: end_id]
-    print(f"Total videos in current shard: {len(fid_info_shard)}/{len(raw2fid.keys())}")
+    for rank in range(nshard):
+        start_id, end_id = num_per_shard*rank, num_per_shard*(rank+1)
+        fid_info_shard = list(raw2fid.items())[start_id: end_id]
+        """
+        fid_info_shard contains (key, value) pair in raw2fid in a list
+        """
+        print(f"Total videos in current shard: {len(fid_info_shard)}/{len(raw2fid.keys())}")
+        future = pool.submit(trim_video_frame_per_block, fid_info_shard, raw_dir, output_dir, ffmpeg, rank)
+        future.add_done_callback(lambda future: print(future.result()))
+        print(f'task {rank} submitted.')
+    pool.shutdown()
+        
+    
+
+def trim_video_frame_per_block(fid_info_shard, raw_dir, output_dir, ffmpeg, rank):
+    decimal, fps = 9, 25
+    i_raw = -1
+    
     for raw_fid, fid_info in tqdm(fid_info_shard):
         i_raw += 1
+        """
+        original video path
+        """
         raw_path = os.path.join(raw_dir, raw_fid+'.mp4')
         tmp_dir = tempfile.mkdtemp()
         cmd = ffmpeg + " -i " + raw_path + " " + tmp_dir + '/%0' + str(decimal) + 'd.png -loglevel quiet'
@@ -153,13 +190,14 @@ def trim_video_frame(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
                 shutil.copyfile(imname, sub_dir+'/'+str(ix).zfill(decimal)+'.png')
             output_path = os.path.join(output_dir, fid+'.mp4')
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            cmd = [ffmpeg, "-i", sub_dir+'/%0'+str(decimal)+'d.png', "-y", "-crf", "20", output_path, "-loglevel", "quiet"]
+            cmd = [ffmpeg, "-i", sub_dir+'/%0'+str(decimal)+'d.png', "-y", "-crf", "20", output_path, "-loglevel", "warning"]
 
             pipe = subprocess.call(cmd, stdout = subprocess.PIPE, stderr = subprocess.STDOUT) # subprocess.PIPE
         shutil.rmtree(tmp_dir)
-    return
+    return f'shard {rank} finished.'
 
 def trim_audio(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
+    ffmpeg = get_ffmpeg_path(ffmpeg)
     df = read_csv(csv_fn)
     raw2fid = OrderedDict()
     for fid, start, end in zip(df['id'], df['start'], df['end']):
@@ -195,7 +233,7 @@ def trim_audio(csv_fn, raw_dir, output_dir, ffmpeg, rank, nshard):
         shutil.rmtree(tmp_dir)
     return
 
-def trim_pretrain(root_dir, out_dir, ffmpeg, rank=0, nshard=1, step=1):
+def trim_pretrain(root_dir, out_dir, ffmpeg, rank, nshard, step=1):
     pretrain_dir = os.path.join(root_dir, 'pretrain')
     print(f"Trim original videos in pretrain")
     csv_fn = os.path.join(out_dir, 'short-pretrain.csv')
@@ -207,45 +245,79 @@ def trim_pretrain(root_dir, out_dir, ffmpeg, rank=0, nshard=1, step=1):
         output_video_dir, output_audio_dir = os.path.join(out_dir, 'short-pretrain'), os.path.join(out_dir, 'audio/short-pretrain/')
         os.makedirs(output_video_dir, exist_ok=True)
         os.makedirs(output_audio_dir, exist_ok=True)
-        trim_video_frame(csv_fn, pretrain_dir, output_video_dir, ffmpeg, rank, nshard)
+        trim_video_frame(csv_fn, pretrain_dir, output_video_dir, ffmpeg, nshard)
         trim_audio(csv_fn, pretrain_dir, output_audio_dir, ffmpeg, rank, nshard)
     return
 
-def prep_wav(lrs3_root, ffmpeg, rank, nshard):
-    output_dir = f"{lrs3_root}/audio/"
+def prep_wav(lrs3_root, output, ffmpeg, nshard):
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor()
+    output = f"{output}/audio/"
+    ffmpeg = get_ffmpeg_path(ffmpeg)
     video_fns = glob.glob(lrs3_root + '/trainval/*/*mp4') + glob.glob(lrs3_root + '/test/*/*mp4')
-    video_fns = sorted(video_fns)
+    video_fns = sorted(video_fns)  # sort is applied as a strategy to make the processing result reproducable.
     num_per_shard = math.ceil(len(video_fns)/nshard)
-    start_id, end_id = num_per_shard*rank, num_per_shard*(rank+1)
-    video_fns = video_fns[start_id: end_id]
-    print(f"{len(video_fns)} videos")
-    # subdirs = os.listdir(input_dir)
-    for video_fn in tqdm(video_fns):
-        base_name = '/'.join(video_fn.split('/')[-3:])
+    for rank in range(nshard):
+        start_id, end_id = num_per_shard*rank, num_per_shard*(rank+1)
+        video_fns_into_shard = video_fns[start_id: end_id]
+        print(f"{len(video_fns_into_shard)} videos")
+        future = pool.submit(prep_wav_per_block, video_fns_into_shard, output, ffmpeg, rank)
+        future.add_done_callback(lambda future: print(future.result()))
+        print(f'task {rank} submitted.')
+    pool.shutdown()
+        
+
+def prep_wav_per_block(video_fns_into_shard, output_dir, ffmpeg, rank):
+    for video_fn in tqdm(video_fns_into_shard):
+        """
+        Iterating over mp4 files in trainval and test,
+        and convert mp4 files to audio(.wav) files in output dir.
+        Note that unlike step 1 and 2 which were applied on pretrain set,
+        trainval and test sets will not undergo step 1 and 2
+        because they are generally shorter and more stable in length.
+        
+        base_name: trainval(test)/*/*mp4
+        output_dir: {output}/audio
+        audio_fn: {output}/audio/trainval(test)/*/*wav
+        """
+        base_name = leave_last_two_slashes(video_fn)
         audio_fn = os.path.join(output_dir, base_name.replace('mp4', 'wav'))
         os.makedirs(os.path.dirname(audio_fn), exist_ok=True)
-        cmd = ffmpeg + " -i " + video_fn + " -f wav -vn -y " + audio_fn + ' -loglevel quiet'
+        cmd = ffmpeg + " -i " + video_fn + " -f wav -vn -y " + audio_fn + ' -loglevel warning'
         subprocess.call(cmd, shell=True)
-    return
+    return f'shard {rank} finished.'
 
-def get_file_label(lrs3_root):
+def leave_last_two_slashes(x):
+    """
+    trim absolute filename to produce str like:
+    /pretrain/*/*.mp4
+    /test/*/*.mp4
+    ...
+    """
+    return '/'.join(x.split('/')[-3:])
+
+def get_file_label(lrs3_root, output_dir):
+    """
+    merge text results for pretrain, test and trainval.
+    produce file.list for videos and label.list for labels.
+    """
     video_ids_total, labels_total = [], []
     for split in ['trainval', 'test']:
         subdirs = os.listdir(os.path.join(lrs3_root, split))
         for subdir in tqdm(subdirs):
             video_fns = glob.glob(os.path.join(lrs3_root, split, subdir, '*mp4'))
-            video_ids = ['/'.join(x.split('/')[-3:])[:-4] for x in video_fns]
+            video_ids = [leave_last_two_slashes(x)[:-4] for x in video_fns]  # ['(trainval or test)/GlpGBSBpxOE/50010', ...]
             for video_id in video_ids:
-                txt_fn = os.path.join(lrs3_root, video_id+'.txt')
+                txt_fn = os.path.join(lrs3_root, video_id+'.txt') 
                 label = open(txt_fn).readlines()[0].split(':')[1].strip()
                 labels_total.append(label)
                 video_ids_total.append(video_id)
-    pretrain_csv = os.path.join(lrs3_root, 'short-pretrain.csv')
+    pretrain_csv = os.path.join(output_dir, 'short-pretrain.csv')
     df = read_csv(pretrain_csv)
     for video_id, label in zip(df['id'], df['text']):
-        video_ids_total.append(os.path.join('short-pretrain', video_id))
+        video_ids_total.append(os.path.join('short-pretrain', video_id))  # ['short-pretrain/GlpGBSBpxOE/00006_1', ...]
         labels_total.append(label)
-    video_id_fn, label_fn = os.path.join(lrs3_root, 'file.list'), os.path.join(lrs3_root, 'label.list')
+    video_id_fn, label_fn = os.path.join(output_dir, 'file.list'), os.path.join(output_dir, 'label.list')
     print(video_id_fn, label_fn)
     with open(video_id_fn, 'w') as fo:
         fo.write('\n'.join(video_ids_total)+'\n')
@@ -254,19 +326,25 @@ def get_file_label(lrs3_root):
     return
 
 if __name__ == '__main__':
+    """
+    step 1 should be quick and smooth, producing a csv file to be used for step 2 only.
+    step 2 relies on the csv file produced from step 1 and is most time-consuming.
+    step 3 is independent of any step and can therefore be executed anytime.
+    step 4 relies on the csv file produced from step 1 only and can be executed independently of step 2 and 3.
+    """
     import argparse
     parser = argparse.ArgumentParser(description='LRS3 preprocess pretrain dir', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--lrs3', type=str, help='lrs3 root dir')
     parser.add_argument('--output', type=str, help='output dir')
     parser.add_argument('--ffmpeg', type=str, help='path to ffmpeg')
-    parser.add_argument('--rank', type=int, help='rank id')
-    parser.add_argument('--nshard', type=int, help='number of shards')
+    parser.add_argument('--rank', type=int, help='rank id', default=0)
+    parser.add_argument('--nshard', type=int, help='number of shards', default=1)
     parser.add_argument('--step', type=int, help='Steps (1: split labels, 2: trim video/audio, 3: prep audio for trainval/test, 4: get labels and file list)')
     args = parser.parse_args()
     if args.step <= 2:
         trim_pretrain(args.lrs3, args.output, args.ffmpeg, args.rank, args.nshard, step=args.step)
     elif args.step == 3:
         print(f"Extracting audio for trainval/test")
-        prep_wav(args.lrs3, args.ffmpeg, args.rank, args.nshard)
+        prep_wav(args.lrs3, args.output, args.ffmpeg, args.nshard)
     elif args.step == 4:
-        get_file_label(args.lrs3)
+        get_file_label(args.lrs3, args.output)
