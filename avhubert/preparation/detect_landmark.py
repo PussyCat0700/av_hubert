@@ -9,6 +9,20 @@ import cv2,dlib,time
 import numpy as np
 from tqdm import tqdm
 
+from multiprocessing import  Process
+class DetectProcess(Process):
+    def __init__(self, face_predictor_path, cnn_detector_path, input_dir, output_dir, fids_per_shard):
+        super(DetectProcess,self).__init__()
+        self.face_predictor_path = face_predictor_path
+        self.cnn_detector_path = cnn_detector_path
+        self.input_dir = input_dir
+        self.output_dir = output_dir
+        self.fids_per_shard = fids_per_shard
+        
+    def run(self):
+        detect_face_landmarks_per_shard(self.face_predictor_path, self.cnn_detector_path, self.input_dir, self.output_dir, self.fids_per_shard)
+
+
 def load_video(path):
     videogen = skvideo.io.vread(path)
     frames = np.array([frame for frame in videogen])
@@ -29,30 +43,33 @@ def detect_landmark(image, detector, cnn_detector, predictor):
         return coords
 
 def detect_face_landmarks(face_predictor_path, cnn_detector_path, root_dir, landmark_dir, flist_fn, nshard):
-    from concurrent.futures import ThreadPoolExecutor
-    def callback(future):
-        finished[future.result()] = 1
-        print(f'currently finished:{sum(finished)}')
-    pool = ThreadPoolExecutor(max_workers=64)
-    input_dir = root_dir #
-    output_dir = landmark_dir #
     fids = [ln.strip() for ln in open(flist_fn).readlines()]
     num_per_shard = math.ceil(len(fids)/nshard)
     finished = [0] * nshard
+    process_list = []
     for rank in range(nshard):
         start_id, end_id = num_per_shard*rank, num_per_shard*(rank+1)
         fids_per_shard = fids[start_id: end_id]
-        future = pool.submit(detect_face_landmarks_per_shard, face_predictor_path, cnn_detector_path, input_dir, output_dir, fids_per_shard, rank)
-        future.add_done_callback(callback)
+        p = DetectProcess(face_predictor_path, cnn_detector_path, root_dir, landmark_dir, fids_per_shard)
+        p.start()
+        process_list.append(p)
         print(f"task {rank} submitted :{len(fids_per_shard)} files")
-    pool.shutdown()
+    finish_sum = 0
+    for rank, p in enumerate(process_list):
+        p.join()
+        finish_sum += 1
+        finished[rank] = 1
+        print(f'{finish_sum} of {nshard} processes finished. {nshard-finish_sum} to go.')
+    
     unfinished_idx = [i for i, x in enumerate(finished) if x == 0]
-    print(*unfinished_idx)
     if len(unfinished_idx) == 0:
         print(f'ALL {sum(finished)} SHARDS ACCOMPLISHED.')
+    else:
+        print('==========REPORT:UNFINISHED PROCESS==========')
+        print(*unfinished_idx)
     
 
-def detect_face_landmarks_per_shard(face_predictor_path, cnn_detector_path, input_dir, output_dir, fids_per_shard, rank):
+def detect_face_landmarks_per_shard(face_predictor_path, cnn_detector_path, input_dir, output_dir, fids_per_shard):
     detector = dlib.get_frontal_face_detector()
     cnn_detector = dlib.cnn_face_detection_model_v1(cnn_detector_path)
     predictor = dlib.shape_predictor(face_predictor_path)
@@ -68,7 +85,6 @@ def detect_face_landmarks_per_shard(face_predictor_path, cnn_detector_path, inpu
             landmarks.append(landmark)
         os.makedirs(os.path.dirname(output_fn), exist_ok=True)
         pickle.dump(landmarks, open(output_fn, 'wb'))
-    return rank
 
 
 if __name__ == '__main__':
