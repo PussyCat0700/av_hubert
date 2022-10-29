@@ -168,7 +168,6 @@ class AVHubertCtc(BaseFairseqModel):
 
     def get_normalized_probs(self, net_output, log_probs):
         """Get normalized probabilities (or log probs) from a net's output."""
-
         logits = net_output["encoder_out"]
         if log_probs:
             return utils.log_softmax(logits.float(), dim=-1)
@@ -295,8 +294,8 @@ class HubertEncoder(FairseqEncoder):
 
         w2v_args.task.data = cfg.data
 
-        task = tasks.setup_task(w2v_args.task)
-        model = task.build_model(w2v_args.model)
+        task = tasks.setup_task(w2v_args.task)  # pretraining task from hubert_pretraining.py
+        model = task.build_model(w2v_args.model)  # wav2vec model pretrained from hubert_pretraining.py
 
         if state is not None and not cfg.no_pretrained_weights:
             # set strict=False because we omit some modules
@@ -462,11 +461,11 @@ class AVHubertSeq2Seq(FairseqEncoderDecoderModel):
 
         w2v_args.task.data = cfg.data
 
-        task_pretrain = tasks.setup_task(w2v_args.task)
+        task_pretrain = tasks.setup_task(w2v_args.task)  # pretraining task from hubert_pretraining.py
         if state is not None:
             task_pretrain.load_state_dict(state['task_state'])
 
-        encoder_ = task_pretrain.build_model(w2v_args.model)
+        encoder_ = task_pretrain.build_model(w2v_args.model)  # wav2vec model pretrained from hubert_pretraining.py
 
         encoder = HubertEncoderWrapper(encoder_)
         if state is not None and not cfg.no_pretrained_weights:

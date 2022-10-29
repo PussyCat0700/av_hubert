@@ -324,12 +324,13 @@ class SubModel(nn.Module):
     def forward(self, x):
         if self.resnet is not None:
             x = self.resnet(x)
-        x = self.proj(x.transpose(1, 2))
+        # after self.resnet, output (B, C, T)
+        x = self.proj(x.transpose(1, 2))  # (B, T, EED)
         if self.encoder is not None:
             x = self.encoder(x)[0].transpose(1, 2)
         else:
             x = x.transpose(1, 2)
-        return x
+        return x  #(B, EED, T)
 
 @register_model("av_hubert", dataclass=AVHubertConfig)
 class AVHubertModel(BaseFairseqModel):

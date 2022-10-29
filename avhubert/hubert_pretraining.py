@@ -232,7 +232,7 @@ class AVHubertPretrainingTask(FairseqTask):
         if not self.cfg.is_s2s:
             procs = [LabelEncoder(dictionary) for dictionary in dictionaries]
         else:
-            logger.info(f"Using tokenizer")
+            logger.info(f"Using tokenizer:{self.s2s_tokenizer}")
             bpe_tokenizer = self.s2s_tokenizer
             procs = [LabelEncoderS2SToken(dictionary, bpe_tokenizer) for dictionary in dictionaries]
         paths = [

@@ -9,6 +9,8 @@ import math
 import torch.nn as nn
 import pdb
 
+from avhubert.pyconvblock import PyConv4
+
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ def downsample_basic_block_v2( inplanes, outplanes, stride ):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, relu_type = 'relu' ):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, relu_type = 'relu', conv2='conv3x3' ):
         super(BasicBlock, self).__init__()
 
         assert relu_type in ['relu','prelu']
@@ -52,7 +54,7 @@ class BasicBlock(nn.Module):
         else:
             raise Exception('relu type not implemented')
 
-        self.conv2 = conv3x3(planes, planes)
+        self.conv2 = conv3x3(planes, planes) if conv2 == 'conv3x3' else PyConv4(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
         
         self.downsample = downsample
@@ -157,10 +159,10 @@ class ResEncoder(nn.Module):
         B, C, T, H, W = x.size()
         x = self.frontend3D(x)
         Tnew = x.shape[2]
-        x = self.threeD_to_2D_tensor(x)
+        x = self.threeD_to_2D_tensor(x)  #(B*Tnew, C, H, W)
         x = self.trunk(x)
-        x = x.view(B, Tnew, x.size(1))
-        x = x.transpose(1, 2).contiguous()
+        x = x.view(B, Tnew, x.size(1))  #(B, Tnew, C)
+        x = x.transpose(1, 2).contiguous() #(B, C, Tnew)
         return x
 
     def threeD_to_2D_tensor(self, x):

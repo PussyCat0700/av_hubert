@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import hashlib
+import time
 import editdistance
 from argparse import Namespace
 
@@ -109,8 +110,13 @@ def _main(cfg, output_file):
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
     utils.import_user_module(cfg.common)
+    use_cuda = True
+    logger.info(f'Use Gpu = {use_cuda}')
     models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path])
-    models = [model.eval().cuda() for model in models]
+    tsv_dir = "/home/yfliu/datasets/lrs3/30h_data"
+    saved_cfg.task['data'] = tsv_dir
+    saved_cfg.task['label_dir'] = tsv_dir
+    models = [model.eval().cuda() if use_cuda else model.eval() for model in models]
     saved_cfg.task.modalities = cfg.override.modalities
     task = tasks.setup_task(saved_cfg.task)
 
@@ -124,7 +130,6 @@ def _main(cfg, output_file):
         np.random.seed(cfg.common.seed)
         utils.set_torch_seed(cfg.common.seed)
 
-    use_cuda = torch.cuda.is_available()
 
     # Set dictionary
     dictionary = task.target_dictionary
@@ -257,7 +262,8 @@ def _main(cfg, output_file):
         n_total += len(ref)
     wer = 100 * n_err / n_total
     wer_fn = f"{cfg.common_eval.results_path}/wer.{fid}"
-    with open(wer_fn, "w") as fo:
+    with open(wer_fn, "a") as fo:
+        fo.write(f'\n=================={time.asctime()}=================\n')
         fo.write(f"WER: {wer}\n")
         fo.write(f"err / num_ref_words = {n_err} / {n_total}\n\n")
         fo.write(f"{yaml_str}")
