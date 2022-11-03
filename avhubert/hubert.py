@@ -715,7 +715,6 @@ class AVHubertModel(BaseFairseqModel):
             features = torch.cat([features_audio, features_video], dim=1)
         elif self.modality_fuse == 'add':
             features = features_audio + features_video
-        features_pen = features.float().pow(2).mean()
 
         features = features.transpose(1, 2)
         features = self.layer_norm(features)
@@ -730,7 +729,6 @@ class AVHubertModel(BaseFairseqModel):
         features = self.dropout_input(features)
         unmasked_features = self.dropout_features(unmasked_features)
         x = features
-        mask_indices = None
 
         # feature: (B, T, D), float
         # target: (B, T), long

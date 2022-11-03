@@ -4,41 +4,29 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from argparse import Namespace
-import contextlib
 import copy
 import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass, field
-from omegaconf import MISSING, II, open_dict
-from typing import Any, Optional
 
-from fairseq import checkpoint_utils, tasks, utils
-from fairseq.dataclass import FairseqDataclass
-from fairseq.dataclass.utils import convert_namespace_to_omegaconf
-from fairseq.tasks import FairseqTask
+from fairseq import utils
 from fairseq.models import (
-    BaseFairseqModel,
-    FairseqEncoder,
-    FairseqEncoderDecoderModel,
     FairseqIncrementalDecoder,
-    register_model,
 )
 # from fairseq.models.wav2vec.wav2vec2 import MASKING_DISTRIBUTION_CHOICES
 from fairseq.modules import (
     LayerNorm,
     PositionalEmbedding,
-    TransformerDecoderLayer,
 )
+from .relaxed_transformer import RelaxedTransformerDecoderLayer
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`TransformerDecoderLayer`.
+    is a :class:`RelaxedTransformerDecoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -104,7 +92,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.layers = nn.ModuleList([])
         self.layers.extend(
             [
-                TransformerDecoderLayer(transformer_cfg, no_encoder_attn)
+                RelaxedTransformerDecoderLayer(transformer_cfg, no_encoder_attn)
                 for _ in range(transformer_cfg.decoder_layers)
             ]
         )

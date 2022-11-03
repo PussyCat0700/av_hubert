@@ -160,9 +160,9 @@ class ResEncoder(nn.Module):
         x = self.frontend3D(x)
         Tnew = x.shape[2]
         x = self.threeD_to_2D_tensor(x)  #(B*Tnew, C, H, W)
-        x = self.trunk(x)
-        x = x.view(B, Tnew, x.size(1))  #(B, Tnew, C)
-        x = x.transpose(1, 2).contiguous() #(B, C, Tnew)
+        x = self.trunk(x)  #(B*Tnew, -1)
+        x = x.view(B, Tnew, x.size(1))  #(B, Tnew, -1)
+        x = x.transpose(1, 2).contiguous() #(B, -1, Tnew)
         return x
 
     def threeD_to_2D_tensor(self, x):
