@@ -792,18 +792,6 @@ class RelaxedMultiheadAttention(MultiheadAttention):
                 attn_weights = attn_weights.mean(dim=0)
 
         return attn, attn_weights
-    
-class RelaxedTransformerEncoderLayer(TransformerDecoderLayer):
-    def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False):
-        # return super().build_self_attention(embed_dim, args, add_bias_kv, add_zero_attn)
-        return RelaxedMultiheadAttention(
-            embed_dim,
-            args.encoder_attention_heads,
-            dropout=args.attention_dropout,
-            self_attention=True,
-            q_noise=self.quant_noise,
-            qn_block_size=self.quant_noise_block_size,
-        )
         
 class RelaxedTransformerDecoderLayer(TransformerDecoderLayer):
     def build_encoder_attention(self, embed_dim, args):
@@ -817,6 +805,7 @@ class RelaxedTransformerDecoderLayer(TransformerDecoderLayer):
             encoder_decoder_attention=True,
             q_noise=self.quant_noise,
             qn_block_size=self.quant_noise_block_size,
+            relaxed_attention_weight=args.relax_cross_attn_weight if args.relax_cross_attn_weight is float else 0.0,        
         )
     def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False):
         # return super().build_self_attention(embed_dim, args, add_bias_kv, add_zero_attn)
@@ -829,4 +818,5 @@ class RelaxedTransformerDecoderLayer(TransformerDecoderLayer):
             self_attention=not getattr(args, "cross_self_attention", False),
             q_noise=self.quant_noise,
             qn_block_size=self.quant_noise_block_size,
+            relaxed_attention_weight=args.relax_self_attn_weight if args.relax_self_attn_weight is float else 0.0,
         )

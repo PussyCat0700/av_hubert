@@ -246,6 +246,20 @@ class AVHubertSeq2SeqConfig(AVHubertAsrConfig):
         metadata={"help": "share decoder input and output embeddings"},
     )
     no_scale_embedding: bool = field(default=True, metadata={'help': 'scale embedding'})
+    relax_self_attn_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "relax attention weight for self attention "
+            "inside the decoder"
+        },
+    )
+    relax_cross_attn_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "relax attention weight for cross attention "
+            "inside the decoder"
+        },
+    )
 
 class HubertEncoder(FairseqEncoder):
     def __init__(self, cfg: AVHubertAsrConfig, tgt_dict=None):
