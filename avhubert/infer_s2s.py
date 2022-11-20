@@ -18,6 +18,7 @@ from argparse import Namespace
 
 import numpy as np
 import torch
+from relaxed_transformer import RelaxedTransformerDecoderLayer
 from fairseq import checkpoint_utils, options, tasks, utils, distributed_utils
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.logging import progress_bar
@@ -106,16 +107,24 @@ def _main(cfg, output_file):
         stream=output_file,
     )
     logger = logging.getLogger("hybrid.speech_recognize")
-    if output_file is not sys.stdout:  # also print to stdout
-        logger.addHandler(logging.StreamHandler(sys.stdout))
+    # if output_file is not sys.stdout:  # also print to stdout
+    #     logger.addHandler(logging.StreamHandler(sys.stdout))
 
     utils.import_user_module(cfg.common)
     use_cuda = True
     logger.info(f'Use Gpu = {use_cuda}')
     models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path])
+    # disable matched inference
+    # if models[0].decoder.layers[0] is RelaxedTransformerDecoderLayer:
+    #     for layer in models.decoder.layers:
+    #         layer.encoder_attn.relaxed_attention_weight=0.0
+    #         layer.self_attn.relaxed_attention_weight=0.0
+    #     logger.info(f'matched inference disabled.')
+    
     tsv_dir = "/home/yfliu/datasets/lrs3/30h_data"
     saved_cfg.task['data'] = tsv_dir
     saved_cfg.task['label_dir'] = tsv_dir
+    
     models = [model.eval().cuda() if use_cuda else model.eval() for model in models]
     saved_cfg.task.modalities = cfg.override.modalities
     task = tasks.setup_task(saved_cfg.task)

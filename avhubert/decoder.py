@@ -20,13 +20,14 @@ from fairseq.modules import (
     LayerNorm,
     PositionalEmbedding,
 )
-from .relaxed_transformer import RelaxedTransformerDecoderLayer
+from fairseq.modules.transformer_layer import TransformerDecoderLayer
+# from .relaxed_transformer import RelaxedTransformerDecoderLayer
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`RelaxedTransformerDecoderLayer`.
+    is a :class:`TransformerDecoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -92,7 +93,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.layers = nn.ModuleList([])
         self.layers.extend(
             [
-                RelaxedTransformerDecoderLayer(transformer_cfg, no_encoder_attn)
+                TransformerDecoderLayer(transformer_cfg, no_encoder_attn)
                 for _ in range(transformer_cfg.decoder_layers)
             ]
         )

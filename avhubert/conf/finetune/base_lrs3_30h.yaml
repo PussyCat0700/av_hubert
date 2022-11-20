@@ -18,8 +18,8 @@ checkpoint:
 distributed_training:
   ddp_backend: c10d
   find_unused_parameters: true
-  distributed_world_size: 8
-  distributed_port: 29671
+  distributed_world_size: 4
+  # distributed_port: 29671
   nprocs_per_node: 8
 
 task:
@@ -57,7 +57,7 @@ optimization:
   max_update: 30000
   lr: [0.001]
   sentence_avg: true
-  update_freq: [1]
+  update_freq: [2]
 
 optimizer:
   _name: adam
@@ -95,6 +95,8 @@ model:
   freeze_finetune_updates: 30000
   share_decoder_input_output_embed: true
   decoder_normalize_before: true
+  # relax_self_attn_weight: 0.001
+  # relax_cross_attn_weight: 0.25
 
 hydra:
   job:
