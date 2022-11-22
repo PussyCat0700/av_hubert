@@ -7,6 +7,7 @@
 import itertools
 import logging
 import os
+import pdb
 import sys
 import time
 from typing import Any, List, Optional, Union
@@ -377,7 +378,6 @@ class AVHubertDataset(FairseqDataset):
         samples = [s for s in samples if s["id"] is not None]
         if len(samples) == 0:
             return {}
-
         audio_source, video_source = [s["audio_source"] for s in samples], [s["video_source"] for s in samples]
         if audio_source[0] is None:
             audio_source = None

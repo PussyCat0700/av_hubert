@@ -6,6 +6,7 @@
 
 import logging
 import os, glob
+import pdb
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -224,7 +225,7 @@ class AVHubertPretrainingTask(FairseqTask):
             return self.cfg.data
         return self.cfg.label_dir
 
-    def load_dataset(self, split: str, **kwargs) -> None:
+    def load_dataset(self, split: str, task) -> None:
         manifest = f"{self.cfg.data}/{split}.tsv"
         dictionaries = [self.target_dictionary] if self.fine_tuning else self.dictionaries
         pad_list = [dictionary.pad() for dictionary in dictionaries]
@@ -241,32 +242,33 @@ class AVHubertPretrainingTask(FairseqTask):
         image_aug = self.cfg.image_aug if split == 'train' else False
         noise_fn, noise_snr = f"{self.cfg.noise_wav}/{split}.tsv" if self.cfg.noise_wav is not None else None, eval(self.cfg.noise_snr)
         noise_num = self.cfg.noise_num # 
+        # pdb.set_trace()
         self.datasets[split] = AVHubertDataset(
-            manifest,
-            sample_rate=self.cfg.sample_rate,
-            label_paths=paths,
-            label_rates=self.cfg.label_rate,
+            manifest,  #  a path list where you store your tsv files
+            sample_rate=self.cfg.sample_rate,  # 16000 (constant)
+            label_paths=paths,  # a path list where you store your dictionaries
+            label_rates=self.cfg.label_rate,  # -1 for inference
             pad_list=pad_list,
             eos_list=eos_list,
             label_processors=procs,
-            max_keep_sample_size=self.cfg.max_sample_size,
-            min_keep_sample_size=self.cfg.min_sample_size,
-            max_sample_size=self.cfg.max_trim_sample_size,
-            pad_audio=self.cfg.pad_audio,
-            normalize=self.cfg.normalize,
+            max_keep_sample_size=500,  # Fixed to 500 because ctc inference don't take max_sample_size as input
+            min_keep_sample_size=self.cfg.min_sample_size,  # None
+            max_sample_size=task.max_sample_size,  # 500
+            pad_audio=task.pad_audio,  # Should be True
+            normalize=self.cfg.normalize,  # True
             store_labels=False,
-            random_crop=self.cfg.random_crop,
-            single_target=self.cfg.single_target,
-            stack_order_audio=self.cfg.stack_order_audio,
-            skip_verify=self.cfg.skip_verify,
-            image_mean=self.cfg.image_mean,
-            image_std=self.cfg.image_std,
-            image_crop_size=self.cfg.image_crop_size,
-            image_aug=image_aug,
-            modalities=self.cfg.modalities,
-            is_s2s=self.cfg.is_s2s,
+            random_crop=task.random_crop,  #  Should be False in decoding
+            single_target=self.cfg.single_target,  # True
+            stack_order_audio=task.stack_order_audio,  # if you are getting audio dim 26 which is 1/4 of 104, check if this param is set to 4.
+            skip_verify=self.cfg.skip_verify,  # False in inference
+            image_mean=self.cfg.image_mean,  # 0.421
+            image_std=self.cfg.image_std,  # 0.165
+            image_crop_size=self.cfg.image_crop_size,  # 88
+            image_aug=image_aug,  # False in infernece
+            modalities=task.modalities,  # if your modality setting doesn't work, this might be where to find a clue.
+            is_s2s=self.cfg.is_s2s,  # should be False in ctc setting.
             noise_fn=noise_fn,
-            noise_prob=self.cfg.noise_prob,
+            noise_prob=self.cfg.noise_prob,  # 0.0
             noise_snr=noise_snr,
             noise_num=noise_num
         )

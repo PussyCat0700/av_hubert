@@ -151,7 +151,7 @@ def _main(cfg, output_file):
         task.cfg.data = cfg.override.data
     if cfg.override.label_dir is not None:
         task.cfg.label_dir = cfg.override.label_dir
-    task.load_dataset(cfg.dataset.gen_subset, task_cfg=saved_cfg.task)
+    task.load_dataset(cfg.dataset.gen_subset, task=saved_cfg.task)
 
     lms = [None]
 

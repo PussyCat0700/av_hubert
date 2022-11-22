@@ -318,14 +318,15 @@ class SubModel(nn.Module):
     def __init__(self, resnet=None, input_dim=None, cfg=None):
         super().__init__()
         self.resnet = resnet
-        self.proj = nn.Linear(input_dim, cfg.encoder_embed_dim)
+        self.proj = nn.Linear(input_dim, cfg.encoder_embed_dim)  # Linear(in_features=512 or 104, out_features=768, bias=True)
         self.encoder = TransformerEncoder(cfg) if cfg.encoder_layers > 0 else None
 
     def forward(self, x):
         if self.resnet is not None:
             x = self.resnet(x)
-        # after self.resnet, output (B, C, T)
-        x = self.proj(x.transpose(1, 2))  # (B, T, EED)
+        # after self.resnet and before proj, output (B, C, T)
+        
+        x = self.proj(x.transpose(1, 2))
         if self.encoder is not None:
             x = self.encoder(x)[0].transpose(1, 2)
         else:
