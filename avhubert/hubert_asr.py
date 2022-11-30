@@ -383,7 +383,7 @@ class HubertEncoderWrapper(FairseqEncoder):
             "source": source,
             "padding_mask": padding_mask,
         }
-
+        # x: (B, T, C), padding_mask: (B, T)
         x, padding_mask = self.w2v_model.extract_finetune(**w2v_args)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
@@ -391,18 +391,18 @@ class HubertEncoderWrapper(FairseqEncoder):
         return {
             "encoder_out": x,  # T x B x C
             "encoder_padding_mask": padding_mask,  # B x T
-            "padding_mask": padding_mask
+            "padding_mask": padding_mask  # B x T
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):
         if encoder_out["encoder_out"] is not None:
             encoder_out["encoder_out"] = encoder_out[
                 "encoder_out"
-            ].index_select(1, new_order)
+            ].index_select(1, new_order)  #(T, B, C)->(T, B*beam_size, C)
         if encoder_out["encoder_padding_mask"] is not None:
             encoder_out["encoder_padding_mask"] = encoder_out[
                 "encoder_padding_mask"
-            ].index_select(0, new_order)
+            ].index_select(0, new_order)  #(B, T)->(B*beam_size, T)
         if encoder_out["padding_mask"] is not None:
             encoder_out["padding_mask"] = encoder_out[
                 "padding_mask"
@@ -491,12 +491,12 @@ class AVHubertSeq2Seq(FairseqEncoderDecoderModel):
         return AVHubertSeq2Seq(encoder, decoder, tgt_dict, cfg)
 
 
-    def forward(self, **kwargs):
+    def forward(self, **kwargs):  # kwargs:['source', 'padding_mask', 'prev_output_tokens']
         ft = self.freeze_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
-            output = self.encoder(**kwargs)
+            output = self.encoder(**kwargs)  # (T, B, C), (B, T), (B, T)
         decoder_out = self.decoder(prev_output_tokens=kwargs['prev_output_tokens'], encoder_out=output)
-        return decoder_out
+        return decoder_out  #[0]=(B, outL, V), [1]={attn, inner_states=B*[outL, B, EED]}
 
     def upgrade_state_dict_named(self, state_dict, name):
         super().upgrade_state_dict_named(state_dict, name)

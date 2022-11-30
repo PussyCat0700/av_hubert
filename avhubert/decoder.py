@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+from itertools import groupby
 import math
 import numpy as np
 import torch
@@ -21,7 +22,7 @@ from fairseq.modules import (
     PositionalEmbedding,
 )
 from fairseq.modules.transformer_layer import TransformerDecoderLayer
-# from .relaxed_transformer import RelaxedTransformerDecoderLayer
+import pdb
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
@@ -130,7 +131,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x, extra = self.extract_features(
             prev_output_tokens, encoder_out, incremental_state
         )
-        x = self.output_layer(x)
+        x = self.output_layer(x) # B,T,EED->B,T,V
         return x, extra
 
     def extract_features(
@@ -159,9 +160,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if positions is not None:
                 positions = positions[:, -1:]
 
-        # embed tokens and positions
+        # embed tokens and positions.
+        # prev_output_tokens=(B, T=42)
         x = self.embed_scale * self.embed_tokens(prev_output_tokens)
-
+        # (B, T=42, EED=768)
         if self.project_in_dim is not None:
             x = self.project_in_dim(x)
 
@@ -180,9 +182,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             dropout_probability = np.random.random()
             if not self.training or (dropout_probability > self.layerdrop):
                 x, attn, _ = layer(
-                    x,
-                    encoder_out["encoder_out"] if encoder_out is not None else None,
-                    encoder_out["padding_mask"] if encoder_out is not None else None,
+                    x,  # (B, T=42)
+                    encoder_out["encoder_out"] if encoder_out is not None else None,  #(T'=138, B=7, EED=768)
+                    encoder_out["padding_mask"] if encoder_out is not None else None,  #(B=7, T'=138)
                     incremental_state,
                     self_attn_mask=self.buffered_future_mask(x)
                     if incremental_state is None
@@ -230,3 +232,83 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     def upgrade_state_dict_named(self, state_dict, name):
         return state_dict
 
+
+"""
+    Adopted from "Leveraging Self-supervised Learning for AVSR"
+    author: Xichen Pan
+"""
+def ctc_greedy_decode(outputBatch, inputLenBatch, eosIx, blank=0):
+    """
+    Greedy search technique for CTC decoding.
+    This decoding method selects the most probable character at each time step. This is followed by the usual CTC decoding
+    to get the predicted transcription.
+    Note: The probability assigned to <EOS> token is added to the probability of the blank token before decoding
+    to avoid <EOS> predictions in middle of transcriptions. Once decoded, <EOS> token is appended at last to the
+    predictions for uniformity with targets.
+    """
+
+    outputBatch[:, :, blank] = torch.log(torch.exp(outputBatch[:, :, blank]) + torch.exp(outputBatch[:, :, eosIx]))
+    reqIxs = np.arange(outputBatch.shape[2])
+    reqIxs = reqIxs[reqIxs != eosIx]  # (V-1)
+    outputBatch = outputBatch[:, :, reqIxs]  # (T, B, V-1), deleting eos = 2 from [0, 999]
+    
+    outputBatch = outputBatch.cpu()
+    inputLenBatch = inputLenBatch.cpu()
+    
+    predCharIxs = torch.argmax(outputBatch, dim=2).T.numpy()  # (B, T)
+    inpLens = inputLenBatch.numpy()  # (B)
+    preds = list()
+    predLens = list()
+    for i in range(len(predCharIxs)):
+        pred = predCharIxs[i]
+        ilen = inpLens[i]
+        pred = pred[:ilen]
+        pred = np.array([x[0] for x in groupby(pred)])  # get rid of repetitive items in CTC
+        pred = pred[pred != blank]  # get rid of blank symbols in CTC
+        pred = list(pred)
+        pred.append(eosIx)
+        preds.extend(pred)
+        predLens.append(len(pred))
+    predictionBatch = torch.tensor(preds).int()
+    predictionLenBatch = torch.tensor(predLens).int()
+    return predictionBatch, predictionLenBatch
+
+"""
+    Adopted from "Leveraging Self-supervised Learning for AVSR"
+    author: Xichen Pan
+"""
+def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, numClasses, blank, eosIx):
+    batch = h.shape[0]
+    g = h[:, :, :, :-1]
+    c = h[:, :, :, -1]
+    alphaCTC = torch.zeros_like(alpha)
+    eosIxMask = c == eosIx
+    eosIxIndex = eosIxMask.nonzero()
+    eosIxIndex = torch.cat((eosIxIndex[:, :1], torch.repeat_interleave((T - 1).unsqueeze(-1), numBeam, dim=0), eosIxIndex[:, 1:]), dim=-1).long()
+    eosIxIndex[:, -1] = 0
+    gamma_eosIxMask = torch.zeros_like(gamma_n).bool()
+    gamma_eosIxMask.index_put_(tuple(map(torch.stack, zip(*eosIxIndex))), torch.tensor(True))
+    alphaCTC[eosIxMask] = np.logaddexp(gamma_n[gamma_eosIxMask], gamma_b[gamma_eosIxMask])
+
+    if g.shape[-1] == 1:
+        gamma_n[:, 1, 0, 1:-1] = CTCOutLogProbs[:, 1, 1:-1]
+    else:
+        gamma_n[:, 1, :numBeam, 1:-1] = -np.inf
+    gamma_b[:, 1, :numBeam, 1:-1] = -np.inf
+
+    psi = gamma_n[:, 1, :numBeam, 1:-1]
+    for t in range(2, T.max()):
+        activeBatch = t < T
+        gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()
+        added_gamma_n = torch.repeat_interleave(gamma_n[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1)
+        if len(gEndWithc):
+            added_gamma_n.index_put_(tuple(map(torch.stack, zip(*gEndWithc))), torch.tensor(-np.inf).float())
+        phi = np.logaddexp(torch.repeat_interleave(gamma_b[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1), added_gamma_n)
+        expandShape = [batch, numBeam, numClasses - 1]
+        gamma_n[:, t, :numBeam, 1:-1][activeBatch] = np.logaddexp(gamma_n[:, t - 1, :numBeam, 1:-1][activeBatch], phi[activeBatch]) \
+                                                     + CTCOutLogProbs[:, t, None, 1:-1].expand(expandShape)[activeBatch]
+        gamma_b[:, t, :numBeam, 1:-1][activeBatch] = \
+            np.logaddexp(gamma_b[:, t - 1, :numBeam, 1:-1][activeBatch], gamma_n[:, t - 1, :numBeam, 1:-1][activeBatch]) \
+            + CTCOutLogProbs[:, t, None, None, blank].expand(expandShape)[activeBatch]
+        psi[activeBatch] = np.logaddexp(psi[activeBatch], phi[activeBatch] + CTCOutLogProbs[:, t, None, 1:-1].expand(phi.shape)[activeBatch])
+    return torch.cat((psi, alphaCTC[:, :, -1:]), dim=-1)

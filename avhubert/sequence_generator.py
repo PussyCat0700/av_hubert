@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import pdb
 from typing import Dict, List, Optional
 import sys
 
@@ -260,7 +261,8 @@ class SequenceGenerator(nn.Module):
         # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
         new_order = new_order.to(src_device).long()
-        encoder_outs = self.model.reorder_encoder_out(encoder_outs, new_order)
+        # len=1; (encoder_out=[155, 6, 768], padding_mask=[6, 155])
+        encoder_outs = self.model.reorder_encoder_out(encoder_outs, new_order)  # (encoder_out=[155, 300, 768], padding_mask=[300, 155])
         # ensure encoder_outs is a List.
         assert encoder_outs is not None
 
@@ -332,7 +334,7 @@ class SequenceGenerator(nn.Module):
                 encoder_outs = self.model.reorder_encoder_out(
                     encoder_outs, reorder_state
                 )
-
+            # pdb.set_trace()
             lprobs, avg_attn_scores = self.model.forward_decoder(
                 tokens[:, : step + 1],
                 encoder_outs,

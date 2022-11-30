@@ -322,6 +322,7 @@ class SubModel(nn.Module):
         self.encoder = TransformerEncoder(cfg) if cfg.encoder_layers > 0 else None
 
     def forward(self, x):
+        # Video:(B, C=1, T, H, W)
         if self.resnet is not None:
             x = self.resnet(x)
         # after self.resnet and before proj, output (B, C, T)
@@ -350,8 +351,8 @@ class AVHubertModel(BaseFairseqModel):
         sub_cfg = deepcopy(cfg)
         sub_cfg.encoder_layers = sub_cfg.sub_encoder_layers
         resnet = ResEncoder(relu_type=cfg.resnet_relu_type, weights=cfg.resnet_weights)
-        self.feature_extractor_audio = SubModel(resnet=None, input_dim=cfg.audio_feat_dim, cfg=sub_cfg)
-        self.feature_extractor_video = SubModel(resnet=resnet, input_dim=resnet.backend_out, cfg=sub_cfg)
+        self.feature_extractor_audio = SubModel(resnet=None, input_dim=cfg.audio_feat_dim, cfg=sub_cfg)  #(B, EED=768, T)
+        self.feature_extractor_video = SubModel(resnet=resnet, input_dim=resnet.backend_out, cfg=sub_cfg)  #(B, EED=768, T)
         self.modality_dropout, self.audio_dropout = cfg.modality_dropout, cfg.audio_dropout
         self.modality_fuse = cfg.modality_fuse
         self.encoder_embed_dim = cfg.encoder_embed_dim
@@ -441,7 +442,7 @@ class AVHubertModel(BaseFairseqModel):
         model = AVHubertModel(cfg, task.cfg, task.dictionaries, **kwargs)
         return model
 
-    def apply_input_mask(self, x, padding_mask, target_list):
+    def apply_input_mask(self, x, padding_mask):
         B, C, T = x.shape[:3]
         is_audio = True if len(x.shape) == 3 else False
         if is_audio:
@@ -495,73 +496,20 @@ class AVHubertModel(BaseFairseqModel):
             logger.info(f"No mask channel prob for input masking")
         return x, mask_indices
 
-    def apply_feature_mask(self, x, padding_mask, target_list):
-        B, T, C = x.shape
-        assert self.mask_prob_audio == self.mask_prob_image and self.mask_length_audio == self.mask_length_image, f"masking prob/length for image/audio be same for feature masking"
-        mask_prob, mask_length = self.mask_prob_audio, self.mask_length_image
-        if mask_prob > 0:
-            mask_indices, _, _, _ = compute_mask_indices(
-                (B, T),
-                padding_mask,
-                mask_prob,
-                mask_length,
-                self.mask_selection,
-                self.mask_other,
-                min_masks=2,
-                no_overlap=self.no_mask_overlap,
-                min_space=self.mask_min_space,
-            )
-            mask_indices = torch.from_numpy(mask_indices).to(x.device)
-            x[mask_indices] = self.mask_emb
-        else:
-            mask_indices = None
-
-        if self.mask_channel_prob > 0:
-            mask_channel_indices, _, _, _ = compute_mask_indices(
-                (B, C),
-                None,
-                self.mask_channel_prob,
-                self.mask_channel_length,
-                self.mask_channel_selection,
-                self.mask_channel_other,
-                no_overlap=self.no_mask_channel_overlap,
-                min_space=self.mask_channel_min_space,
-            )
-            mask_channel_indices = (
-                torch.from_numpy(mask_channel_indices)
-                .to(x.device)
-                .unsqueeze(1)
-                .expand(-1, T, -1)
-            )
-            x[mask_channel_indices] = 0
-
-        return x, mask_indices
-
-    def forward_features(self, source: torch.Tensor, modality: str) -> torch.Tensor:
+    def forward_features(self, source: torch.Tensor, modality: str, have_grad=True) -> torch.Tensor:
         extractor = eval(f"self.feature_extractor_{modality}")
-        if self.feature_grad_mult > 0:
+        feature_grad_mult = self.feature_grad_mult
+        if not have_grad:
+            feature_grad_mult = 0.0
+        if feature_grad_mult > 0:
             features = extractor(source)
-            if self.feature_grad_mult != 1.0:
-                features = GradMultiply.apply(features, self.feature_grad_mult)
+            if feature_grad_mult != 1.0:
+                features = GradMultiply.apply(features, feature_grad_mult)
         else:
             with torch.no_grad():
                 features = extractor(source)
         return features
 
-    def forward_targets(
-            self, features: torch.Tensor, mask_indices: torch.Tensor, target_list: List[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Trim features to ensure labels exist and then get aligned labels
-        feat_tsz = features.size(2)
-        targ_tsz = min([t.size(1) for t in target_list])
-        if self.feat2tar_ratio * feat_tsz > targ_tsz:
-            feat_tsz = int(targ_tsz / self.feat2tar_ratio)
-            features = features[..., :feat_tsz]
-            if mask_indices is not None:
-                mask_indices = mask_indices[..., :feat_tsz]
-        target_inds = torch.arange(feat_tsz).float() * self.feat2tar_ratio
-        target_list = [t[:, target_inds.long()] for t in target_list]
-        return features, mask_indices, target_list
 
     def forward_padding_mask(
         self, features: torch.Tensor, padding_mask: torch.Tensor,
@@ -575,129 +523,11 @@ class AVHubertModel(BaseFairseqModel):
         padding_mask = padding_mask.all(-1)
         return padding_mask
 
-    def compute_logits(self, feats, emb_mat):
-        # feats: [B, T, F], emb_mat: [V, F]
-        if self.sim_type == 'dot':
-            logits = torch.matmul(feats, emb_mat.transpose(0, 1))
-        elif self.sim_type == 'cosine':
-            batch_size, timesteps, emb_dim = feats.size()
-            feats_ = feats.view(-1, emb_dim)
-            nom = (feats_.unsqueeze(dim=1) * emb_mat.unsqueeze(dim=0)).sum(dim=-1) # [B*T, V]
-            denom = (feats_**2).sum(dim=-1).sqrt().unsqueeze(dim=1) * (emb_mat**2).sum(dim=-1).sqrt().unsqueeze(dim=0) # [B*T, V]
-            logits = (nom/denom.clamp(min=1e-6)).view(batch_size, timesteps, -1)
-        else:
-            raise NotImplementedError
-        logits = logits / self.logit_temp
-        return logits
-
-    def forward(
-        self,
-        source: torch.Tensor,
-        target_list: Optional[List[torch.Tensor]] = None,
-        padding_mask: Optional[torch.Tensor] = None,
-        mask: bool = True,
-        features_only: bool = False,
-        output_layer: Optional[int] = None
-    ) -> Dict[str, torch.Tensor]:
-        """output layer is 1-based"""
-        src_audio, src_video = source['audio'], source['video']
-        if mask and self.masking_type == 'input':
-            src_video, mask_indices_video = self.apply_input_mask(src_video, padding_mask, target_list)
-            src_audio, mask_indices_audio = self.apply_input_mask(src_audio, padding_mask, target_list)
-            mask_indices = torch.logical_or(mask_indices_audio, mask_indices_video)
-        else:
-            src_audio, src_video, mask_indices = src_audio, src_video, None
-
-        features_audio = self.forward_features(src_audio, modality='audio') # features: [B, F, T]
-        features_video = self.forward_features(src_video, modality='video')
-        modality_drop_prob, audio_drop_prob = np.random.random(), np.random.random()
-        if self.training:
-            if modality_drop_prob < self.modality_dropout:
-                if audio_drop_prob < self.audio_dropout:
-                    features_audio = 0 * features_audio
-                else:
-                    features_video = 0 * features_video
-        if self.modality_fuse == 'concat':
-            features = torch.cat([features_audio, features_video], dim=1)
-        elif self.modality_fuse == 'add':
-            features = features_audio + features_video
-        if target_list is not None:
-            features, mask_indices, target_list = self.forward_targets(features, mask_indices, target_list)
-
-        features_pen = features.float().pow(2).mean()
-
-        features = features.transpose(1, 2)
-        features = self.layer_norm(features)
-
-        if padding_mask is not None:
-            padding_mask = self.forward_padding_mask(features, padding_mask)
-
-        if self.post_extract_proj is not None:
-            features = self.post_extract_proj(features)
-
-        features = self.dropout_input(features)
-        if self.masking_type == 'feature' and mask:
-            x, mask_indices = self.apply_feature_mask(features, padding_mask, target_list)
-        else:
-            x = features
-
-        # feature: (B, T, D), float
-        # target: (B, T), long
-        # x: (B, T, D), float
-        # padding_mask: (B, T), bool
-        # mask_indices: (B, T), bool
-        x, _ = self.encoder(
-            x,
-            padding_mask=padding_mask,
-            layer=None if output_layer is None else output_layer - 1
-        )
-
-        if features_only:
-            return {"x": x, "padding_mask": padding_mask, "features": features}
-
-        label_embs_list = self.label_embs_concat.split(self.num_classes, 0)
-        proj_x = self.final_proj(x)
-        if self.untie_final_proj:
-            proj_x_list = proj_x.chunk(len(self.num_classes), dim=-1)
-        else:
-            proj_x_list = [proj_x for _ in self.num_classes]
-        logit_list = [self.compute_logits(proj, emb).view(-1, num_class) for proj, emb, num_class in zip(proj_x_list, label_embs_list, self.num_classes)] # [[B*T, V]]
-        mask, unmask = torch.logical_and(mask_indices, ~padding_mask).view(-1), torch.logical_and(~mask_indices, ~padding_mask).view(-1) # [B*T]
-        logit_m_list, logit_u_list = [logit[mask] for logit in logit_list], [logit[unmask] for logit in logit_list]
-        target_m_list, target_u_list = [target.view(-1)[mask].long() for target in target_list], [target.view(-1)[unmask].long() for target in target_list]
-        result = {
-            "logit_m_list": logit_m_list,
-            "logit_u_list": logit_u_list,
-            "target_m_list": target_m_list,
-            "target_u_list": target_u_list,
-            "padding_mask": padding_mask,
-            "features_pen": features_pen,
-        }
-        return result
-
-    def extract_features(
-        self,
-        source: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
-        mask: bool = False,
-        ret_conv: bool = False,
-        output_layer: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        res = self.forward(
-            source,
-            padding_mask=padding_mask,
-            mask=mask,
-            features_only=True,
-            output_layer=output_layer,
-        )
-        feature = res["features"] if ret_conv else res["x"]
-        return feature, res["padding_mask"]
-
     def extract_finetune(self, source, padding_mask=None, mask=False, ret_conv=False, output_layer=None):
         src_audio, src_video = source['audio'], source['video']
         if mask and self.masking_type == 'input':
-            src_video, mask_indices_video = self.apply_input_mask(src_video, padding_mask, target_list=None)
-            src_audio, mask_indices_audio = self.apply_input_mask(src_audio, padding_mask, target_list=None)
+            src_video, mask_indices_video = self.apply_input_mask(src_video, padding_mask)
+            src_audio, mask_indices_audio = self.apply_input_mask(src_audio, padding_mask)
             mask_indices = torch.logical_or(mask_indices_audio, mask_indices_video) # mask_indices not used in fine-tuning
         else:
             src_audio, src_video, mask_indices = src_audio, src_video, None

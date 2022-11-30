@@ -9,3 +9,4 @@ from .hubert_dataset import *
 from .hubert_pretraining import *
 from .hubert_criterion import *
 from .relaxed_transformer import *
+from .hubert_hybrid import *

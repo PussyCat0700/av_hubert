@@ -29,6 +29,21 @@ def load_video(path):
             if i == 2:
                 raise ValueError(f"Unable to load {path}")
 
+def flatten_to_fit_ctc(target_out, target_lengths):
+    """
+
+    Args:
+        target_out (Tensor): (B, num_classes, T)
+        target_lengths (_type_): (B, T)
+
+    Returns:
+        _type_: (sum(length of each batch))
+    """
+    target_mask = target_out.new(*(target_out.shape)).fill_(0)
+    target_mask[(torch.arange(target_mask.shape[0]), target_lengths.long() - 1)] = 1
+    target_mask = target_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
+    target_out = target_out[target_mask]
+    return target_out
 
 class Compose(object):
     """Compose several preprocess together.
