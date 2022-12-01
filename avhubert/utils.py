@@ -45,6 +45,31 @@ def flatten_to_fit_ctc(target_out, target_lengths):
     target_out = target_out[target_mask]
     return target_out
 
+def add_spm_word_pad(dictionary, sequence):
+    """Add dictionary.pad() token to spm processed sequence so that words are seperated by pad token.
+
+    Args:
+        dictionary (fairseq.data.Dictionary): target dictionary.
+        sequence (Tensor): list of indexes for words in target dictionary.
+
+    Returns:
+        sequence (Tensor): list of padded indexes for words in target dictionary.
+    """
+    pad_idx = dictionary.pad()
+    append_list = []
+    sequence = list(sequence)
+    
+    for i, dict_idx in enumerate(sequence):
+        subword = dictionary[dict_idx]
+        if i > 0 and subword.startswith('▁'):
+            append_list.append(i+len(append_list))
+    
+    for append_at in append_list:
+        sequence.insert(append_at, pad_idx)
+    
+    sequence = torch.Tensor(sequence)
+    return sequence
+
 class Compose(object):
     """Compose several preprocess together.
     Args:

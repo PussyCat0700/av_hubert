@@ -13,7 +13,7 @@ from argparse import Namespace
 import torch
 import torch.nn as nn
 from avhubert.decoder import ctc_greedy_decode
-from avhubert.error_rate import compute_error_word
+from avhubert.error_rate import compute_error_ch, compute_error_word
 from avhubert.hubert_asr import AVHubertSeq2SeqConfig, HubertEncoderWrapper, Embedding
 from fairseq import checkpoint_utils, tasks, metrics
 from fairseq.utils import log_softmax, get_perplexity, item as get_item
@@ -113,8 +113,8 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         ctc_out = ctc_out.transpose(1, 2).transpose(0, 1)  # (T, B, num_classes)
         ctc_out_lengths = ctc_out.new(ctc_out.size(1)).fill_(ctc_out.size(0)).int()
         target = sample['target']
-        target_lengths = sample['target_lengths']
         sample_size = target.size(0)
+        target_lengths = sample['target_lengths']
         concat_targets = flatten_to_fit_ctc(target_out=target, target_lengths=target_lengths)
         # input, target, input_lengths, target_lengths
         ctc_loss = self.ctc_loss(ctc_out, target, ctc_out_lengths, target_lengths)
@@ -122,6 +122,7 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         # checkpoint save metric computation
         prediction, prediction_len = ctc_greedy_decode(ctc_out.detach(), ctc_out_lengths, self.eos)  # prediction=(concatenation of B preds), predicion_len=(B)
         w_edits, w_counts = compute_error_word(prediction, concat_targets, prediction_len, target_lengths, self.pad)
+        c_edits, c_counts = compute_error_ch(prediction, concat_targets, prediction_len, target_lengths)
         
         # logger output dict
         tot_loss = attn_loss + ctc_loss
@@ -134,7 +135,9 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
             "nsentences": sample["target"].size(0),
             "sample_size": sample_size,
             "w_edits": w_edits,
-            "w_counts": w_counts
+            "w_counts": w_counts,
+            "c_edits": c_edits,
+            "c_counts": c_counts,
         }
         return tot_loss, sample_size, logging_outputs
     
@@ -149,6 +152,8 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
         w_edits = get_item(sum(log.get("w_edits", 0) for log in logging_outputs))
         w_counts = get_item(sum(log.get("w_counts", 0) for log in logging_outputs))
+        c_edits = get_item(sum(log.get("c_edits", 0) for log in logging_outputs))
+        c_counts = get_item(sum(log.get("c_counts", 0) for log in logging_outputs))
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
@@ -171,10 +176,22 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         metrics.log_scalar(
             "w_edits", w_edits
         )
+        metrics.log_scalar(
+            "c_counts", c_counts
+        )
+        metrics.log_scalar(
+            "c_edits", c_edits
+        )
         metrics.log_derived(
             "wer",
             lambda meters: round(
                 meters["w_edits"].sum * 100.0 / meters["w_counts"].sum, 3
+            )
+        )
+        metrics.log_derived(
+            "cer",
+            lambda meters: round(
+                meters["c_edits"].sum * 100.0 / meters["c_counts"].sum, 3
             )
         )
     
