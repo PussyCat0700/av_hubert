@@ -278,32 +278,34 @@ def ctc_greedy_decode(outputBatch, inputLenBatch, eosIx, blank=0):
     author: Xichen Pan
 """
 def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, numClasses, blank, eosIx):
-    batch = h.shape[0]
-    g = h[:, :, :, :-1]
-    c = h[:, :, :, -1]
-    alphaCTC = torch.zeros_like(alpha)
-    eosIxMask = c == eosIx
-    eosIxIndex = eosIxMask.nonzero()
-    eosIxIndex = torch.cat((eosIxIndex[:, :1], torch.repeat_interleave((T - 1).unsqueeze(-1), numBeam, dim=0), eosIxIndex[:, 1:]), dim=-1).long()
-    eosIxIndex[:, -1] = 0
-    gamma_eosIxMask = torch.zeros_like(gamma_n).bool()
-    gamma_eosIxMask.index_put_(tuple(map(torch.stack, zip(*eosIxIndex))), torch.tensor(True))
-    alphaCTC[eosIxMask] = np.logaddexp(gamma_n[gamma_eosIxMask], gamma_b[gamma_eosIxMask])
+    batch = h.shape[0]  # numClasses = V - 1
+    g = h[:, :, :, :-1]  # torch.Size([6, 50, 999, l-1]), 0 being eos
+    c = h[:, :, :, -1]  # torch.Size([6, 50, 999]), 0 being eos
+    alphaCTC = torch.zeros_like(alpha)  # torch.Size([6, 50, 999]), 0 being eos
+    eosIxMask = c == eosIx  # torch.Size([6, 50, 999])
+    eosIxIndex = eosIxMask.nonzero()  # torch.Size(300, 3]), last 3 dims make up a coordinate to locate eosTokens in c.3 dims:(b, beamWidth, V-1)
+    eosIxIndex = torch.cat((eosIxIndex[:, :1], torch.repeat_interleave((T - 1).unsqueeze(-1), numBeam, dim=0), eosIxIndex[:, 1:]), dim=-1).long()  # torch.Size(300, 4]), represents four dims:(b, targetLength, beamWidth, V-1)
+    eosIxIndex[:, -1] = 0  # (eosIx is forced to be set from eos() to eos=0 for every batch/beam in gamma.)
+    gamma_eosIxMask = torch.zeros_like(gamma_n).bool()  # torch.Size([6, Tmax, 50, 1000])
+    gamma_eosIxMask.index_put_(tuple(map(torch.stack, zip(*eosIxIndex))), torch.tensor(True))  # gamma_eosIxMask[eosIxIndex[:]]=True. i.e., eosIxIndex[0]=[0, 31, 0, 0], then gamma_eosIxMask[0, 31, 0, 0]=True.
+    alphaCTC[eosIxMask] = np.logaddexp(gamma_n[gamma_eosIxMask], gamma_b[gamma_eosIxMask])  # logpctc
 
     if g.shape[-1] == 1:
-        gamma_n[:, 1, 0, 1:-1] = CTCOutLogProbs[:, 1, 1:-1]
+        gamma_n[:, 1, 0, 1:-1] = CTCOutLogProbs[:, 1, 1:-1]  # b, tao, blank, ignoring eos(CTC=-1, gamma=0) and blank(CTC=0, gamma=-1)
     else:
         gamma_n[:, 1, :numBeam, 1:-1] = -np.inf
     gamma_b[:, 1, :numBeam, 1:-1] = -np.inf
 
-    psi = gamma_n[:, 1, :numBeam, 1:-1]
+    psi = gamma_n[:, 1, :numBeam, 1:-1]  # (6, 50, 998)
     for t in range(2, T.max()):
         activeBatch = t < T
-        gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()
-        added_gamma_n = torch.repeat_interleave(gamma_n[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1)
+        gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()  # [300, 3]
+        if numBeam>1:
+            pdb.set_trace()
+        added_gamma_n = torch.repeat_interleave(gamma_n[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1)  # torch.Size([6, beamWidth, 998])
         if len(gEndWithc):
-            added_gamma_n.index_put_(tuple(map(torch.stack, zip(*gEndWithc))), torch.tensor(-np.inf).float())
-        phi = np.logaddexp(torch.repeat_interleave(gamma_b[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1), added_gamma_n)
+            added_gamma_n.index_put_(tuple(map(torch.stack, zip(*gEndWithc))), torch.tensor(-np.inf).float())  # endwithc的元素被置零，只留下不endwithc的
+        phi = np.logaddexp(torch.repeat_interleave(gamma_b[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1), added_gamma_n)  # gamma_b无论如何都是要加的
         expandShape = [batch, numBeam, numClasses - 1]
         gamma_n[:, t, :numBeam, 1:-1][activeBatch] = np.logaddexp(gamma_n[:, t - 1, :numBeam, 1:-1][activeBatch], phi[activeBatch]) \
                                                      + CTCOutLogProbs[:, t, None, 1:-1].expand(expandShape)[activeBatch]
@@ -311,4 +313,4 @@ def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, num
             np.logaddexp(gamma_b[:, t - 1, :numBeam, 1:-1][activeBatch], gamma_n[:, t - 1, :numBeam, 1:-1][activeBatch]) \
             + CTCOutLogProbs[:, t, None, None, blank].expand(expandShape)[activeBatch]
         psi[activeBatch] = np.logaddexp(psi[activeBatch], phi[activeBatch] + CTCOutLogProbs[:, t, None, 1:-1].expand(phi.shape)[activeBatch])
-    return torch.cat((psi, alphaCTC[:, :, -1:]), dim=-1)
+    return torch.cat((psi, alphaCTC[:, :, -1:]), dim=-1)  # (998[no blank], 1[eos])
