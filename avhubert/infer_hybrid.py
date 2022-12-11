@@ -3,6 +3,7 @@ cloned from "Leveraging Self-supervised Learning for AVSR"
 author: Xichen Pan
 """
 import argparse
+import copy
 import logging
 import os
 from itertools import chain
@@ -19,7 +20,11 @@ from decoder import ctc_greedy_decode, compute_CTC_prob
 from fairseq import tasks, utils, checkpoint_utils
 from fairseq.logging import progress_bar
 
-def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device="cuda"):
+def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, device="cuda"):
+    """
+    Args:
+        blank (int): blank symbol must be set to zero. Defaults to 0.
+    """
     inputLenBatch = inputBatch['target_lengths']
     encoderOutput = model.encoder(**inputBatch['net_input'])
     # (L,B,dmodel)
@@ -27,23 +32,23 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
     attentionDecoder = model.decoder
 
     CTCOutputBatch = encoderOutput['encoder_out'].transpose(0, 1).transpose(1, 2)  # (L,B,dmodel)->(B,dmodel,L)
-    CTCOutputBatch = CTCOutputConv(CTCOutputBatch)  # (B,num_classes,L)
-    CTCOutputBatch = CTCOutputBatch.transpose(1, 2)  # (B,L,num_classes)
+    CTCOutputBatch = CTCOutputConv(CTCOutputBatch)  # (B,V,L)
+    CTCOutputBatch = CTCOutputBatch.transpose(1, 2)  # (B,L,V)
     # claim batch and time step
     batch = CTCOutputBatch.shape[0]  # B
     T = inputLenBatch.cpu()  # (T)
     numClasses = CTCOutputBatch.shape[-1]
     # claim CTClogprobs and Length
     CTCOutputBatch = CTCOutputBatch.cpu()
-    CTCOutLogProbs = torch.nn.functional.log_softmax(CTCOutputBatch, dim=-1) # (B,L,num_classes)
+    CTCOutLogProbs = torch.nn.functional.log_softmax(CTCOutputBatch, dim=-1) # (B,L,V)
     predictionLenBatch = torch.ones(batch, device=device).long()
     # init Omega and Omegahat for attention beam search
     Omega = [[[(torch.tensor([eosIx]), torch.tensor(0), torch.tensor(0))]] for i in
              range(batch)]  # B*[[(tensor([eos]), 0, 0)]]
     Omegahat = [[] for i in range(batch)]  # B*[]
     # init
-    gamma_n = torch.full((batch, T.max(), beamWidth, numClasses), -np.inf).float()  # (B, Tmax, bw, num_classes)
-    gamma_b = torch.full((batch, T.max(), beamWidth, numClasses), -np.inf).float()  # (B, Tmax, bw, num_classes)
+    gamma_n = torch.full((batch, T.max(), beamWidth, numClasses), -np.inf).float()  # (B, Tmax, bw, V)
+    gamma_b = torch.full((batch, T.max(), beamWidth, numClasses), -np.inf).float()  # (B, Tmax, bw, V)
     for b in range(batch):
         gamma_b[b, 0, 0, 0] = 0  # gamma_b[0]=1, and gamma_n[0] has been set to 0.
         for t in range(1, T[b]):
@@ -53,7 +58,7 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
                 gamma_b[b, t, 0, 0] += gamma_b[b, tao - 1, 0, 0] + CTCOutLogProbs[
                     b, tao, blank]  # gamma_b[t] *= gamma_b[tao-1]*p[tao, blank]
 
-    newhypo = torch.arange(1, numClasses).unsqueeze(-1).unsqueeze(0).unsqueeze(0)  # (1, 1, num_classes-1, 1)
+    newhypo = torch.arange(1, numClasses).unsqueeze(-1).unsqueeze(0).unsqueeze(0)  # (1, 1, V-1, 1)
 
     for l in tqdm(range(1, T.max() + 1), leave=False, desc="Regression", ncols=75):
         predictionBatch = []
@@ -91,28 +96,28 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
         alpha[:, :, :, 1] += attentionOutLogProbs.reshape(batch, numBeam, -1)  # [300, 1, 999], excluding blank=0
 
         # h = (batch * beam * (V-1) * hypoLength)
-        # alpha = (batch * beam * (V-1))
         # CTCOutLogProbs = (batch * sequence length * V)
         # gamma_n or gamma_b = (batch * max time length * beamwidth * V <which is max num of candidates in one time step>)
-        CTCHypoLogProbs = compute_CTC_prob(h, alpha[:, :, :, 1], CTCOutLogProbs, T, gamma_n, gamma_b, numBeam,
+        CTCHypoLogProbs = compute_CTC_prob(h, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam,
                                            numClasses - 1, blank, eosIx)
         alpha[:, :, :, 0] = Lambda * CTCHypoLogProbs + (1 - Lambda) * alpha[:, :, :, 1]
         hPaddingShape = list(h.shape)
         hPaddingShape[-2] = 1
-        h = torch.cat((torch.zeros(hPaddingShape), h), dim=-2)  # (batch * beam * V * hypoLength)
-
+        h = torch.cat((torch.zeros(hPaddingShape), h), dim=-2)  # (batch * beam * V * hypoLength), idx 0 of V is padded and will not be used.
+        alpha = torch.cat((torch.full((batch, numBeam, 1, 2), -np.inf), alpha), dim=-2)  # (batch * beam * V * 2)
+        
         activeBatch = (l < T).nonzero().squeeze(-1).tolist()
         for b in activeBatch:
             for i in range(numBeam):
-                Omegahat[b].append((h[b, i, -1], alpha[b, i, -1, 0]))  # c=eos
-
-        alpha = torch.cat((torch.full((batch, numBeam, 1, 2), -np.inf), alpha), dim=-2)  # (batch * beam * V * hypoLength)
-        alpha[:, :, -1, 0] = -np.inf
-        predictionRes = alpha[:, :, :, 0].reshape(batch, -1).topk(beamWidth, -1).indices  # (batch * beamWidth)
+                Omegahat[b].append((h[b, i, eosIx], copy.deepcopy(alpha[b, i, eosIx, 0])))  # c=eos
+        
+        alpha[:, :, eosIx, 0] = -np.inf
+        predictionRes = alpha[:, :, :, 0].reshape(batch, -1).topk(beamWidth, -1).indices  # (batch * beamWidth) from V*beam, length regradless.
+        # gamma=(B,T,beamWidth,V)
         for b in range(batch):
             for pos, c in enumerate(predictionRes[b]):
-                beam = c // numClasses
-                c = c % numClasses
+                beam = c // numClasses   # floordiv V
+                c = c % numClasses  # mod v
                 Omega[b][l].append((h[b, beam, c], alpha[b, beam, c, 0], alpha[b, beam, c, 1]))
                 gamma_n[b, :, pos, 0] = gamma_n[b, :, beam, c]
                 gamma_b[b, :, pos, 0] = gamma_b[b, :, beam, c]
@@ -123,6 +128,7 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
     # predictionBatch = model.decoder.embed_tokens(predictionBatch.transpose(0, 1))  # (B, T')--embed-->(T', B, EED)
     predictionBatch = [sorted(Omegahat[b], key=lambda x: x[1], reverse=True)[0][0] for b in range(batch)]  #[([hypo], score)]
     predictionLenBatch = [len(prediction) - 1 for prediction in predictionBatch]
+    pdb.set_trace()
     return torch.cat([prediction[1:] for prediction in predictionBatch]).int(), torch.tensor(predictionLenBatch).int()
 
 
@@ -182,12 +188,14 @@ def inference(model, evalProgress, logger, task, cfg, use_cuda):
                 raise RuntimeError(f"can not recognize decodeType:{cfg.generation.decodeType}")
             predictionStr = decode_fn(spm, predictionBatch.int().cpu(), symbols_to_ignore_spm)
             targetStr = decode_fn(spm, concatTargetoutBatch.int().cpu(), symbols_to_ignore_spm)
+            pdb.set_trace()
+            logger.info(f'pred:{predictionStr}')
+            logger.info(f'trgt:{targetStr}')
+            # with open("pred_%s.txt" % cfg.generation.decodeType, "a") as f:
+            #     f.write(predictionStr)
 
-            with open("pred_%s.txt" % cfg.generation.decodeType, "a") as f:
-                f.write(predictionStr)
-
-            with open("trgt.txt", "a") as f:
-                f.write(targetStr)
+            # with open("trgt.txt", "a") as f:
+            #     f.write(targetStr)
 
             c_edits, c_count = compute_error_ch(predictionBatch, concatTargetoutBatch, predictionLenBatch,
                                                 targetLenBatch)

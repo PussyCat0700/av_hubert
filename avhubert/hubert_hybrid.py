@@ -22,7 +22,7 @@ from fairseq.criterions.fairseq_criterion import FairseqCriterion
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import BaseFairseqModel, register_model
 from fairseq.criterions import register_criterion
-from fairseq.criterions.label_smoothed_cross_entropy import LabelSmoothedCrossEntropyCriterionConfig, label_smoothed_nll_loss
+from fairseq.criterions.label_smoothed_cross_entropy import LabelSmoothedCrossEntropyCriterion, LabelSmoothedCrossEntropyCriterionConfig, label_smoothed_nll_loss
 
 DBG=True if len(sys.argv) == 1 else False
 
@@ -86,6 +86,21 @@ class CTCLoss(nn.CTCLoss):
         log_probs = log_softmax(ctc_out, dim=-1)
         return super(CTCLoss, self).forward(log_probs, concat_targets, input_lengths, target_lengths)
         
+@register_criterion(
+    "my_ce_loss", dataclass=LabelSmoothedCrossEntropyCriterionConfig
+)
+class MyCELoss(LabelSmoothedCrossEntropyCriterion):
+    def get_lprobs_and_target(self, model, net_output, sample):
+        lprobs = log_softmax(net_output, dim=-1)  # (7, 42, 1000)
+        target = sample['target']  #(7, 42)
+        if self.ignore_prefix_size > 0:
+            if getattr(lprobs, "batch_first", False):
+                lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
+                target = target[:, self.ignore_prefix_size :].contiguous()
+            else:
+                lprobs = lprobs[self.ignore_prefix_size :, :, :].contiguous()
+                target = target[self.ignore_prefix_size :, :].contiguous()
+        return lprobs.view(-1, lprobs.size(-1)), target.view(-1)
 
 @register_criterion(
     "hybrid_attn_ctc_loss", dataclass=LabelSmoothedCrossEntropyCriterionConfig
@@ -125,7 +140,7 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         c_edits, c_counts = compute_error_ch(prediction, concat_targets, prediction_len, target_lengths)
         
         # logger output dict
-        tot_loss = attn_loss + ctc_loss
+        tot_loss = 0.8*attn_loss + 0.2*ctc_loss
         logging_outputs = {
             "ctc_loss": ctc_loss,
             "attn_loss": attn_loss,
