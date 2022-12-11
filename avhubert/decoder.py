@@ -281,7 +281,7 @@ def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, num
     batch = h.shape[0]  # numClasses = V - 1
     g = h[:, :, :, :-1]  # torch.Size([6, 50, 999, l-1]), 0 being eos
     c = h[:, :, :, -1]  # torch.Size([6, 50, 999]), 0 being eos
-    alphaCTC = torch.zeros_like(alpha)  # torch.Size([6, 50, 999]), 0 being eos
+    alphaCTC = torch.zeros_like(alpha)  # torch.Size([6, 50, 999]), -1 being eos
     eosIxMask = c == eosIx  # torch.Size([6, 50, 999])
     eosIxIndex = eosIxMask.nonzero()  # torch.Size(300, 3]), last 3 dims make up a coordinate to locate eosTokens in c.3 dims:(b, beamWidth, V-1)
     eosIxIndex = torch.cat((eosIxIndex[:, :1], torch.repeat_interleave((T - 1).unsqueeze(-1), numBeam, dim=0), eosIxIndex[:, 1:]), dim=-1).long()  # torch.Size(300, 4]), represents four dims:(b, targetLength, beamWidth, V-1)
@@ -300,8 +300,6 @@ def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, num
     for t in range(2, T.max()):
         activeBatch = t < T
         gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()  # [300, 3]
-        if numBeam>1:
-            pdb.set_trace()
         added_gamma_n = torch.repeat_interleave(gamma_n[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1)  # torch.Size([6, beamWidth, 998])
         if len(gEndWithc):
             added_gamma_n.index_put_(tuple(map(torch.stack, zip(*gEndWithc))), torch.tensor(-np.inf).float())  # endwithc的元素被置零，只留下不endwithc的
@@ -313,4 +311,4 @@ def compute_CTC_prob(h, alpha, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, num
             np.logaddexp(gamma_b[:, t - 1, :numBeam, 1:-1][activeBatch], gamma_n[:, t - 1, :numBeam, 1:-1][activeBatch]) \
             + CTCOutLogProbs[:, t, None, None, blank].expand(expandShape)[activeBatch]
         psi[activeBatch] = np.logaddexp(psi[activeBatch], phi[activeBatch] + CTCOutLogProbs[:, t, None, 1:-1].expand(phi.shape)[activeBatch])
-    return torch.cat((psi, alphaCTC[:, :, -1:]), dim=-1)  # (998[no blank], 1[eos])
+    return torch.cat((psi, alphaCTC[:, :, -1:]), dim=-1)  # (998[no blank], -1[eos])

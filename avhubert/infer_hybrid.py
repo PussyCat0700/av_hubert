@@ -81,14 +81,14 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
             alpha.append([])
             for o in Omega[b][l - 1][:beamWidth]:
                 h[b].append([o[0].tolist()])  # [[[l]]]
-                alpha[b].append([[o[1], o[2]]])  #[[[tensor(-14.9989), tensor(-11.4477)]]]
+                alpha[b].append([[o[1], o[2]]])  #[[[tensor(-14.9989) b, tensor(-11.4477) nb]]]
         h = torch.tensor(h)  # (B, beamWidth, 1, l)
         alpha = torch.tensor(alpha).float()  # (B, beamWidth, 1, 2)
         numBeam = alpha.shape[1]
         recurrnewhypo = torch.repeat_interleave(torch.repeat_interleave(newhypo, batch, dim=0), numBeam, dim=1)  # [B, beamWidth, V-1, 1]
         h = torch.cat((torch.repeat_interleave(h, numClasses - 1, dim=2), recurrnewhypo), dim=-1)  # [B, beamWidth, V-1, l+1]
         alpha = torch.repeat_interleave(alpha, numClasses - 1, dim=2)  # [B, beamWidth, V-1, 2]
-        alpha[:, :, :, 1] += attentionOutLogProbs.reshape(batch, numBeam, -1)  # [300, 1, 999]
+        alpha[:, :, :, 1] += attentionOutLogProbs.reshape(batch, numBeam, -1)  # [300, 1, 999], excluding blank=0
 
         # h = (batch * beam * (V-1) * hypoLength)
         # alpha = (batch * beam * (V-1))
@@ -104,7 +104,7 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
         activeBatch = (l < T).nonzero().squeeze(-1).tolist()
         for b in activeBatch:
             for i in range(numBeam):
-                Omegahat[b].append((h[b, i, -1], alpha[b, i, -1, 0]))
+                Omegahat[b].append((h[b, i, -1], alpha[b, i, -1, 0]))  # c=eos
 
         alpha = torch.cat((torch.full((batch, numBeam, 1, 2), -np.inf), alpha), dim=-2)  # (batch * beam * V * hypoLength)
         alpha[:, :, -1, 0] = -np.inf
@@ -121,7 +121,7 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank, device=
         predictionLenBatch += 1
 
     # predictionBatch = model.decoder.embed_tokens(predictionBatch.transpose(0, 1))  # (B, T')--embed-->(T', B, EED)
-    predictionBatch = [sorted(Omegahat[b], key=lambda x: x[1], reverse=True)[0][0] for b in range(batch)]
+    predictionBatch = [sorted(Omegahat[b], key=lambda x: x[1], reverse=True)[0][0] for b in range(batch)]  #[([hypo], score)]
     predictionLenBatch = [len(prediction) - 1 for prediction in predictionBatch]
     return torch.cat([prediction[1:] for prediction in predictionBatch]).int(), torch.tensor(predictionLenBatch).int()
 
