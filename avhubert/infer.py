@@ -24,7 +24,7 @@ from examples.speech_recognition.new.decoders.decoder_config import (
     DecoderConfig,
     FlashlightDecoderConfig,
 )
-from examples.speech_recognition.new.decoders.decoder import Decoder
+from viterbi import ViterbiDecoder
 from fairseq import checkpoint_utils, distributed_utils, progress_bar, tasks, utils
 from fairseq.data.data_utils import post_process
 from fairseq.dataclass.configs import (
@@ -114,7 +114,7 @@ class InferenceProcessor:
         self.saved_cfg = saved_cfg
         self.tgt_dict = self.task.target_dictionary
         self.task.load_dataset(cfg.dataset.gen_subset, task=saved_cfg.task)
-        self.generator = Decoder(cfg.decoding, self.tgt_dict)
+        self.generator = ViterbiDecoder(self.tgt_dict)
 													  
         self.gen_timer = StopwatchMeter()
         self.wps_meter = TimeMeter()

@@ -15,7 +15,7 @@ import torch.nn as nn
 from avhubert.decoder import ctc_greedy_decode
 from avhubert.error_rate import compute_error_ch, compute_error_word
 from avhubert.hubert_asr import AVHubertSeq2SeqConfig, HubertEncoderWrapper, Embedding
-from fairseq import checkpoint_utils, tasks, metrics
+from fairseq import checkpoint_utils, tasks, metrics, utils
 from fairseq.utils import log_softmax, get_perplexity, item as get_item
 from .utils import flatten_to_fit_ctc
 from fairseq.criterions.fairseq_criterion import FairseqCriterion
@@ -23,6 +23,7 @@ from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import BaseFairseqModel, register_model
 from fairseq.criterions import register_criterion
 from fairseq.criterions.label_smoothed_cross_entropy import LabelSmoothedCrossEntropyCriterion, LabelSmoothedCrossEntropyCriterionConfig, label_smoothed_nll_loss
+import editdistance
 
 DBG=True if len(sys.argv) == 1 else False
 
@@ -74,16 +75,15 @@ class SmoothedCELoss(nn.Module):
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1)
 
 class CTCLoss(nn.CTCLoss):
-    def forward(self, ctc_out, concat_targets, input_lengths, target_lengths):
+    def forward(self, log_probs, concat_targets, input_lengths, target_lengths):
         """CTC Loss For AV-HuBERT Hybrid
 
         Args:
-            ctc_out (Tensor): (T, B, num_classes)
+            log_probs (Tensor): (T, B, num_classes)
 
         Returns:
             Tensor: CTC Loss
         """
-        log_probs = log_softmax(ctc_out, dim=-1)
         return super(CTCLoss, self).forward(log_probs, concat_targets, input_lengths, target_lengths)
         
 @register_criterion(
@@ -115,7 +115,9 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         super().__init__(task)
         self.eos = task.target_dictionary.eos()
         self.pad = task.target_dictionary.pad()
-        self.ctc_loss = CTCLoss(reduction='mean', blank=blank, zero_infinity=True)
+        self.blank = blank
+        self.tgt_dict = task.target_dictionary
+        self.ctc_loss = CTCLoss(reduction='mean', blank=self.blank, zero_infinity=True)
         self.ce_loss = SmoothedCELoss(self.pad, label_smoothing, ignore_prefix_size)
         
     def forward(self, model, sample, reduce=True):
@@ -126,18 +128,42 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         
         # ctc loss
         ctc_out = ctc_out.transpose(1, 2).transpose(0, 1)  # (T, B, num_classes)
-        ctc_out_lengths = ctc_out.new(ctc_out.size(1)).fill_(ctc_out.size(0)).int()
-        target = sample['target']
+        ctc_out = log_softmax(ctc_out, dim=-1)
+        ctc_out_lengths = ctc_out.new(ctc_out.size(1)).fill_(ctc_out.size(0)).int()  # (b, sLen)
+        target = sample['target']  # (b, tLen)
         sample_size = target.size(0)
-        target_lengths = sample['target_lengths']
-        concat_targets = flatten_to_fit_ctc(target_out=target, target_lengths=target_lengths)
+        target_lengths = sample['target_lengths']  # (tLen)
         # input, target, input_lengths, target_lengths
         ctc_loss = self.ctc_loss(ctc_out, target, ctc_out_lengths, target_lengths)
         
         # checkpoint save metric computation
-        prediction, prediction_len = ctc_greedy_decode(ctc_out.detach(), ctc_out_lengths, self.eos)  # prediction=(concatenation of B preds), predicion_len=(B)
-        w_edits, w_counts = compute_error_word(prediction, concat_targets, prediction_len, target_lengths, self.pad)
-        c_edits, c_counts = compute_error_ch(prediction, concat_targets, prediction_len, target_lengths)
+        def get_pred(e):
+            toks = e.argmax(dim=-1).unique_consecutive()
+            return toks[toks != self.blank]
+        def post_process_to_fit_spm(sentence):
+            return sentence.replace(" ", "").replace("\u2581", " ").strip()
+        hypos = [get_pred(x).int().cpu() for x in ctc_out.transpose(0, 1)]
+        w_edits = 0
+        w_counts = 0
+        for batch_id in range(len(sample["id"].tolist())):
+            if "target_label" in sample:
+                toks = sample["target_label"]
+            else:
+                toks = sample["target"]
+            toks = toks[batch_id, :]
+            hypo = hypos[batch_id]
+            # Processes hypothesis.
+            hyp_pieces = self.tgt_dict.string(hypo)
+            hyp_words = post_process_to_fit_spm(hyp_pieces)
+
+            # Processes target.
+            target_tokens = utils.strip_pad(toks, self.tgt_dict.pad())
+            tgt_pieces = self.tgt_dict.string(target_tokens.int().cpu())
+            tgt_words = post_process_to_fit_spm(tgt_pieces)
+            hyp_words, tgt_words = hyp_words.split(), tgt_words.split()
+            errs, length = editdistance.eval(hyp_words, tgt_words), len(tgt_words)
+            w_edits += errs
+            w_counts += length
         
         # logger output dict
         tot_loss = 0.8*attn_loss + 0.2*ctc_loss
@@ -151,8 +177,6 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
             "sample_size": sample_size,
             "w_edits": w_edits,
             "w_counts": w_counts,
-            "c_edits": c_edits,
-            "c_counts": c_counts,
         }
         return tot_loss, sample_size, logging_outputs
     
@@ -167,8 +191,6 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
         w_edits = get_item(sum(log.get("w_edits", 0) for log in logging_outputs))
         w_counts = get_item(sum(log.get("w_counts", 0) for log in logging_outputs))
-        c_edits = get_item(sum(log.get("c_edits", 0) for log in logging_outputs))
-        c_counts = get_item(sum(log.get("c_counts", 0) for log in logging_outputs))
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
@@ -191,22 +213,10 @@ class HybridAttentionCTCCriterion(FairseqCriterion):
         metrics.log_scalar(
             "w_edits", w_edits
         )
-        metrics.log_scalar(
-            "c_counts", c_counts
-        )
-        metrics.log_scalar(
-            "c_edits", c_edits
-        )
         metrics.log_derived(
             "wer",
             lambda meters: round(
                 meters["w_edits"].sum * 100.0 / meters["w_counts"].sum, 3
-            )
-        )
-        metrics.log_derived(
-            "cer",
-            lambda meters: round(
-                meters["c_edits"].sum * 100.0 / meters["c_counts"].sum, 3
             )
         )
     
@@ -327,6 +337,13 @@ class AVHubertHybrid(BaseFairseqModel):
         attn_out = attn_out[0]
         
         return ctc_out, attn_out  # (B, num_classes, T), (B, T, num_classes)
+        #  # for ctc greedy decoding forward
+        # with torch.no_grad():
+        #     output = self.encoder(**kwargs)  # (T, B, C), (B, T), (B, T)
+        # CTCOutputBatch = output['encoder_out'].transpose(0, 1).transpose(1, 2)  # (L,B,dmodel)->(B,dmodel,L)
+        # CTCOutputBatch = self.ctc_output_conv(CTCOutputBatch)  # (B,V,L)
+        # CTCOutputBatch = CTCOutputBatch.transpose(1, 2)  # (B,L,V)
+        # return CTCOutputBatch
 
     def upgrade_state_dict_named(self, state_dict, name):
         super().upgrade_state_dict_named(state_dict, name)

@@ -1,0 +1,22 @@
+common:
+  user_dir: ???
+  log_name: ???  # wandb_project
+
+dataset:
+  max_tokens: 1000
+  gen_subset: valid
+  num_workers: 0
+
+common_eval:
+  results_path: ???
+  path: ???
+
+override:
+  modalities: ???
+  data: ???
+  label_dir: ???
+
+generation:
+  decodeType: HYBRID
+  beamWidth: 50
+  Lambda: 0.1
