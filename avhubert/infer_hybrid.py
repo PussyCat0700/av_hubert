@@ -6,16 +6,15 @@ import argparse
 import copy
 import logging
 import os
-from itertools import chain
 import pdb
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from error_rate import compute_error_ch, compute_error_word
-from decoder import ctc_greedy_decode, compute_CTC_prob
+from fairseq.data import data_utils
+from error_rate import compute_error_word
+from decoder import compute_CTC_prob
 
 from fairseq import tasks, utils, checkpoint_utils
 from fairseq.logging import progress_bar
@@ -25,7 +24,6 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, devic
     Args:
         blank (int): blank symbol must be set to zero. Defaults to 0.
     """
-    inputLenBatch = inputBatch['target_lengths']
     encoderOutput = model.encoder(**inputBatch['net_input'])
     # (L,B,dmodel)
     CTCOutputConv = model.ctc_output_conv
@@ -36,12 +34,11 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, devic
     CTCOutputBatch = CTCOutputBatch.transpose(1, 2)  # (B,L,V)
     # claim batch and time step
     batch = CTCOutputBatch.shape[0]  # B
-    T = inputLenBatch.cpu()  # (T)
+    T = torch.tensor(batch*[CTCOutputBatch.shape[1]]).cpu()  # (T)
     numClasses = CTCOutputBatch.shape[-1]
     # claim CTClogprobs and Length
     CTCOutputBatch = CTCOutputBatch.cpu()
     CTCOutLogProbs = torch.nn.functional.log_softmax(CTCOutputBatch, dim=-1) # (B,L,V)
-    predictionLenBatch = torch.ones(batch, device=device).long()
     # init Omega and Omegahat for attention beam search
     Omega = [[[(torch.tensor([eosIx]), torch.tensor(0), torch.tensor(0))]] for i in
              range(batch)]  # B*[[(tensor([eos]), 0, 0)]]
@@ -71,7 +68,6 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, devic
             encoderOutput['encoder_out'] = encoderOutput['encoder_out'][:, encoderIndex, :]
             encoderOutput['padding_mask'] = encoderOutput['padding_mask'][encoderIndex, :]
             encoderOutput['encoder_padding_mask'] = encoderOutput['encoder_padding_mask'][encoderIndex, :]
-            predictionLenBatch = predictionLenBatch[encoderIndex]
         # predictionBatch=(B, 1), encoderOutput=(T, B, EED)
         attentionOutputBatch = attentionDecoder(predictionBatch, encoder_out=encoderOutput)
         attentionOutputBatch = attentionOutputBatch[0]  # (B, L, V)
@@ -118,18 +114,15 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, devic
             for pos, c in enumerate(predictionRes[b]):
                 beam = c // numClasses   # floordiv V
                 c = c % numClasses  # mod v
-                Omega[b][l].append((h[b, beam, c], alpha[b, beam, c, 0], alpha[b, beam, c, 1]))
+                Omega[b][l].append((h[b, beam, c], copy.deepcopy(alpha[b, beam, c, 0]), copy.deepcopy(alpha[b, beam, c, 1])))
                 gamma_n[b, :, pos, 0] = gamma_n[b, :, beam, c]
                 gamma_b[b, :, pos, 0] = gamma_b[b, :, beam, c]
         gamma_n[:, :, :, 1:] = -np.inf
         gamma_b[:, :, :, 1:] = -np.inf
-        predictionLenBatch += 1
 
     # predictionBatch = model.decoder.embed_tokens(predictionBatch.transpose(0, 1))  # (B, T')--embed-->(T', B, EED)
     predictionBatch = [sorted(Omegahat[b], key=lambda x: x[1], reverse=True)[0][0] for b in range(batch)]  #[([hypo], score)]
-    predictionLenBatch = [len(prediction) - 1 for prediction in predictionBatch]
-    pdb.set_trace()
-    return torch.cat([prediction[1:] for prediction in predictionBatch]).int(), torch.tensor(predictionLenBatch).int()
+    return predictionBatch
 
 
 def decode_fn(spm, indexBatch, symbols_to_ignore):
@@ -146,12 +139,8 @@ def num_params(model):
 
 
 def inference(model, evalProgress, logger, task, cfg, use_cuda):
-    evalCER = 0
     evalWER = 0
-    evalPER = 0
-    evalCCount = 0
     evalWCount = 0
-    evalPCount = 0
     
     target_dictionary = task.target_dictionary
     spm = task.datasets[cfg.dataset.gen_subset].label_processors[0]
@@ -159,70 +148,48 @@ def inference(model, evalProgress, logger, task, cfg, use_cuda):
 
     Lambda = cfg.generation.Lambda
     codeDirectory = cfg.common_eval.results_path
-    if os.path.exists(codeDirectory + "pred_%s.txt" % cfg.generation.decodeType):
-        os.remove(codeDirectory + "pred_%s.txt" % cfg.generation.decodeType)
-    if os.path.exists(codeDirectory + "trgt.txt"):
-        os.remove(codeDirectory + "trgt.txt")
+    pred_txt = os.path.join("pred.txt")
+    trgt_txt = os.path.join("trgt.txt")
+    if os.path.exists(pred_txt):
+        os.remove(pred_txt)
+    if os.path.exists(trgt_txt):
+        os.remove(trgt_txt)
 
     model.eval()
     for batch, inputBatch in enumerate(evalProgress):
         inputBatch = utils.move_to_cuda(inputBatch) if use_cuda else inputBatch
-        targetLenBatch = inputBatch['target_lengths']
-        concatTargetoutBatch = inputBatch['target']
+        targetBatch = inputBatch['target']
         with torch.no_grad():
-            if cfg.generation.decodeType == "HYBRID":
-                predictionBatch, predictionLenBatch = \
-                    inference_hybrid(model, inputBatch, Lambda, cfg.generation.beamWidth,
-                                     target_dictionary.eos(), 0, device="cuda" if use_cuda else "cpu")
-            # elif inferenceParams["decodeType"] == "ATTN":
-            #     predictionBatch, predictionLenBatch = \
-            #         model.attentionAutoregression(inputBatch, False, device, inferenceParams["eosIx"])
-            # elif inferenceParams["decodeType"] == "TFATTN":
-            #     inputLenBatch, o  ;'9utputBatch = model(inputBatch, targetinBatch, targetLenBatch.long(), False)
-            #     predictionBatch, predictionLenBatch = teacher_forcing_attention_decode(outputBatch[1], inferenceParams["eosIx"])
-            elif cfg.generation.decodeType == "CTC":
-                inputLenBatch, outputBatch = model(**inputBatch['net_input'])
-                predictionBatch, predictionLenBatch = ctc_greedy_decode(outputBatch[0], inputLenBatch,
-                                                                        target_dictionary.eos())
-            else:
-                raise RuntimeError(f"can not recognize decodeType:{cfg.generation.decodeType}")
+            predictionBatch = inference_hybrid(model, inputBatch, Lambda, cfg.generation.beamWidth,
+                                    target_dictionary.eos(), 0, device="cuda" if use_cuda else "cpu")
+            predictionBatch = data_utils.collate_tokens(predictionBatch, pad_idx=target_dictionary.pad(), 
+                                                        eos_idx=target_dictionary.eos(), left_pad=False)
             predictionStr = decode_fn(spm, predictionBatch.int().cpu(), symbols_to_ignore_spm)
-            targetStr = decode_fn(spm, concatTargetoutBatch.int().cpu(), symbols_to_ignore_spm)
-            pdb.set_trace()
+            targetStr = decode_fn(spm, targetBatch.int().cpu(), symbols_to_ignore_spm)
             logger.info(f'pred:{predictionStr}')
             logger.info(f'trgt:{targetStr}')
-            # with open("pred_%s.txt" % cfg.generation.decodeType, "a") as f:
-            #     f.write(predictionStr)
+            with open(pred_txt, "a") as f:
+                f.write(predictionStr)
 
-            # with open("trgt.txt", "a") as f:
-            #     f.write(targetStr)
-
-            c_edits, c_count = compute_error_ch(predictionBatch, concatTargetoutBatch, predictionLenBatch,
-                                                targetLenBatch)
-            evalCER += c_edits
-            evalCCount += c_count
-            w_edits, w_count = compute_error_word(predictionBatch, concatTargetoutBatch, predictionLenBatch,
-                                                  targetLenBatch,
-                                                  target_dictionary.pad())
+            with open(trgt_txt, "a") as f:
+                f.write(targetStr)
+            w_edits, w_count = compute_error_word(predictionStr, targetStr)
             evalWER += w_edits
             evalWCount += w_count
             evalProgress.log({
-                "CER": evalCER / evalCCount,
                 "WER": evalWER / evalWCount
             }, step=batch+1)
             logger.info(
-                "batch%d || Test CER: %.3f || Test WER: %.3f" % (batch + 1, evalCER / evalCCount, evalWER / evalWCount))
+                "batch%d || Test WER: %.3f" % (batch + 1, evalWER / evalWCount))
 
-    evalCER /= evalCCount if evalCCount > 0 else 1
     evalWER /= evalWCount if evalWCount > 0 else 1
-    evalPER /= evalPCount if evalPCount > 0 else 1
-    return evalCER, evalWER, evalPER
+    return evalWER
 
 def load_and_ensemble_args(args):
     conf = OmegaConf.load(args.yaml_path)
     conf.common.user_dir = args.user_dir
     conf.common.log_name = args.log_name
-    conf.common_eval.results_path = os.path.join(args.output, args.log_name)
+    conf.common_eval.results_path = os.path.join(args.output)
     conf.common_eval.path = args.ckpt_path
     conf.override.modalities = []
     if args.modalities != 'AO':
@@ -290,18 +257,14 @@ def main(args):
         log_format=cfg.common.log_format,
         log_interval=cfg.common.log_interval,
         default_log_format=("tqdm" if not cfg.common.no_progress_bar else "simple"),
-        # wandb_project=cfg.common.log_name,
+        wandb_project=cfg.common.log_name,
     )
 
     logger.info("\nTesting the trained model .... \n")
 
-    testCER, testWER, testPER = inference(model, progress, logger, task, cfg, True)
+    testWER = inference(model, progress, logger, task, cfg, True)
 
-    logger.info("Test CER: %.3f || Test WER: %.3f" % (testCER, testWER))
-    progress.print({
-        "CER": testCER,
-        "WER": testWER,
-    })
+    logger.info("Test WER: %.3f" % (testWER))
 
     logger.info("\nTesting Done.\n")
 
@@ -311,14 +274,14 @@ if __name__ == "__main__":
     parser.add_argument('--config-dir', help='Config directory', default="/home/yfliu/av_hubert/avhubert/conf")
     parser.add_argument('--config-name', help='Name of config file with .postfix', default="hybrid_decode.yaml")
     parser.add_argument('--tsv-dir', help="to override task.label_dir and task.data", default="/home/yfliu/datasets/lrs3/30h_data")
-    parser.add_argument('--ckpt-path', help='finetuned checkpoint path', default="/home/yfliu/output/finetune_hybrid/checkpoints/checkpoint_best.pt")
+    parser.add_argument('--ckpt-path', help='finetuned checkpoint path', default="/home/yfliu/output/finetune_hybrid_0.2/checkpoints/checkpoint_best.pt")
     parser.add_argument('--log-name', help='eval log file and wandb project name', default="decode_hybrid")
     parser.add_argument('--output', help='output dir without project name', default="/home/yfliu/output")
     parser.add_argument('--user-dir', help='command-line pwd result')
     parser.add_argument('--modalities', help='shuold be one of "AO", "VO" or "AV".', default="VO")
     args = parser.parse_args()
     args.yaml_path = os.path.join(args.config_dir, args.config_name)
-    args.output = os.path.join(args.output, f'finetune_{args.log_name}')
+    args.output = os.path.join(args.output, f'{args.log_name}')
     # load args from yaml file using OmegaConf
     args = load_and_ensemble_args(args)
     main(args)

@@ -5,19 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import pdb
 import sys,logging
 import contextlib
 from argparse import Namespace
 
 import torch
 import torch.nn as nn
-from avhubert.decoder import ctc_greedy_decode
-from avhubert.error_rate import compute_error_ch, compute_error_word
 from avhubert.hubert_asr import AVHubertSeq2SeqConfig, HubertEncoderWrapper, Embedding
 from fairseq import checkpoint_utils, tasks, metrics, utils
 from fairseq.utils import log_softmax, get_perplexity, item as get_item
-from .utils import flatten_to_fit_ctc
 from fairseq.criterions.fairseq_criterion import FairseqCriterion
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import BaseFairseqModel, register_model
