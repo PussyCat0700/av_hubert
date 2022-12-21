@@ -4,9 +4,12 @@ author: Xichen Pan
 """
 import argparse
 import copy
+import hashlib
+import json
 import logging
 import os
 import pdb
+import time
 
 import numpy as np
 import torch
@@ -14,6 +17,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 from fairseq.data import data_utils
 from error_rate import compute_error_word
+import editdistance
 from decoder import compute_CTC_prob
 
 from fairseq import tasks, utils, checkpoint_utils
@@ -139,57 +143,59 @@ def num_params(model):
 
 
 def inference(model, evalProgress, logger, task, cfg, use_cuda):
-    evalWER = 0
-    evalWCount = 0
+    num_sentences = 0
+    result_dict = {'utt_id': [], 'ref': [], 'hypo': []}
     
     target_dictionary = task.target_dictionary
     spm = task.datasets[cfg.dataset.gen_subset].label_processors[0]
     symbols_to_ignore_spm = {target_dictionary.eos(), target_dictionary.pad()}
-
     Lambda = cfg.generation.Lambda
-    codeDirectory = cfg.common_eval.results_path
-    pred_txt = os.path.join("pred.txt")
-    trgt_txt = os.path.join("trgt.txt")
-    if os.path.exists(pred_txt):
-        os.remove(pred_txt)
-    if os.path.exists(trgt_txt):
-        os.remove(trgt_txt)
-
+    
     model.eval()
-    for batch, inputBatch in enumerate(evalProgress):
+    for inputBatch in evalProgress:
         inputBatch = utils.move_to_cuda(inputBatch) if use_cuda else inputBatch
         targetBatch = inputBatch['target']
+        if "net_input" not in inputBatch:
+            continue
         with torch.no_grad():
             predictionBatch = inference_hybrid(model, inputBatch, Lambda, cfg.generation.beamWidth,
                                     target_dictionary.eos(), 0, device="cuda" if use_cuda else "cpu")
             predictionBatch = data_utils.collate_tokens(predictionBatch, pad_idx=target_dictionary.pad(), 
                                                         eos_idx=target_dictionary.eos(), left_pad=False)
-            predictionStr = decode_fn(spm, predictionBatch.int().cpu(), symbols_to_ignore_spm)
-            targetStr = decode_fn(spm, targetBatch.int().cpu(), symbols_to_ignore_spm)
-            logger.info(f'pred:{predictionStr}')
-            logger.info(f'trgt:{targetStr}')
-            with open(pred_txt, "a") as f:
-                f.write(predictionStr)
-
-            with open(trgt_txt, "a") as f:
-                f.write(targetStr)
-            w_edits, w_count = compute_error_word(predictionStr, targetStr)
-            evalWER += w_edits
-            evalWCount += w_count
-            evalProgress.log({
-                "WER": evalWER / evalWCount
-            }, step=batch+1)
-            logger.info(
-                "batch%d || Test WER: %.3f" % (batch + 1, evalWER / evalWCount))
-
-    evalWER /= evalWCount if evalWCount > 0 else 1
-    return evalWER
+            for i in range(len(inputBatch["id"])):
+                result_dict['utt_id'].append(inputBatch['utt_id'][i])
+                ref_sent = decode_fn(spm, targetBatch[i].int().cpu(), symbols_to_ignore_spm)
+                result_dict['ref'].append(ref_sent)
+                hypo_str = decode_fn(spm, predictionBatch[i].int().cpu(), symbols_to_ignore_spm)
+                result_dict['hypo'].append(hypo_str)
+                logger.info(f"\nREF:{ref_sent}\nHYP:{hypo_str}\n")
+            num_sentences += inputBatch["nsentences"] if "nsentences" in inputBatch else inputBatch["id"].numel()
+        logger.info("Recognized {:,} utterances".format(num_sentences))
+    yaml_str = OmegaConf.to_yaml(cfg.generation)
+    fid = int(hashlib.md5(yaml_str.encode("utf-8")).hexdigest(), 16)
+    fid = fid % 1000000
+    result_fn = f"{cfg.common_eval.results_path}/hypo-{fid}.json"
+    json.dump(result_dict, open(result_fn, 'w'), indent=4)
+    n_err, n_total = 0, 0
+    assert len(result_dict['hypo']) == len(result_dict['ref'])
+    for hypo, ref in zip(result_dict['hypo'], result_dict['ref']):
+        hypo, ref = hypo.strip().split(), ref.strip().split()
+        n_err += editdistance.eval(hypo, ref)
+        n_total += len(ref)
+    wer = 100 * n_err / n_total
+    wer_fn = f"{cfg.common_eval.results_path}/wer.{fid}"
+    with open(wer_fn, "a") as fo:
+        fo.write(f'\n=================={time.asctime()}=================\n')
+        fo.write(f"WER: {wer}\n")
+        fo.write(f"err / num_ref_words = {n_err} / {n_total}\n\n")
+        fo.write(f"{yaml_str}")
+    logger.info(f"WER: {wer}%")
+    return wer
 
 def load_and_ensemble_args(args):
     conf = OmegaConf.load(args.yaml_path)
     conf.common.user_dir = args.user_dir
-    conf.common.log_name = args.log_name
-    conf.common_eval.results_path = os.path.join(args.output)
+    conf.common_eval.results_path = os.path.join(args.output, conf.dataset.gen_subset)
     conf.common_eval.path = args.ckpt_path
     conf.override.modalities = []
     if args.modalities != 'AO':
@@ -211,9 +217,10 @@ def main(args):
         torch.manual_seed(cfg.common.seed)
         utils.set_torch_seed(cfg.common.seed)
     # logger config settings
-    log_name = cfg.common.log_name
+    os.makedirs(cfg.common_eval.results_path, exist_ok=True)
+    log_path = os.path.join(cfg.common_eval.results_path, "decode.log")
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S',
-                        filename=f'{log_name}.log', filemode='w')
+                        filename=log_path, filemode='w')
     logger = logging.getLogger(__name__)
     # task setup
     use_cuda = torch.cuda.is_available()
@@ -238,26 +245,26 @@ def main(args):
 
     # Load dataset
     itr = task.get_batch_iterator(
-        dataset=task.dataset(cfg.dataset.gen_subset),
-        max_tokens=cfg.dataset.max_tokens,
-        max_sentences=cfg.dataset.batch_size,
+        dataset=task.dataset(cfg.dataset.gen_subset),  # test
+        max_tokens=cfg.dataset.max_tokens,  # 1000
+        max_sentences=cfg.dataset.batch_size,  # None
         max_positions=utils.resolve_max_positions(
             task.max_positions(), model.max_positions()
-        ),
-        ignore_invalid_inputs=cfg.dataset.skip_invalid_size_inputs_valid_test,
-        required_batch_size_multiple=cfg.dataset.required_batch_size_multiple,
-        seed=cfg.common.seed,
-        num_shards=cfg.distributed_training.distributed_world_size,
-        shard_id=cfg.distributed_training.distributed_rank,
-        num_workers=cfg.dataset.num_workers,
-        data_buffer_size=cfg.dataset.data_buffer_size,
+        ),  # 9223372036854775807
+        ignore_invalid_inputs=cfg.dataset.skip_invalid_size_inputs_valid_test,  # False
+        required_batch_size_multiple=cfg.dataset.required_batch_size_multiple,  # 8
+        seed=cfg.common.seed,  # 1
+        num_shards= 1,
+        shard_id=cfg.distributed_training.distributed_rank,  # 0
+        num_workers=cfg.dataset.num_workers,  # 0
+        data_buffer_size=cfg.dataset.data_buffer_size,  # 10
     ).next_epoch_itr(shuffle=False)
+    logger.info(f'eval on set {cfg.dataset.gen_subset}, iteration length={len(itr)}.')
     progress = progress_bar.progress_bar(
         itr,
         log_format=cfg.common.log_format,
         log_interval=cfg.common.log_interval,
         default_log_format=("tqdm" if not cfg.common.no_progress_bar else "simple"),
-        wandb_project=cfg.common.log_name,
     )
 
     logger.info("\nTesting the trained model .... \n")
@@ -274,14 +281,13 @@ if __name__ == "__main__":
     parser.add_argument('--config-dir', help='Config directory', default="/home/yfliu/av_hubert/avhubert/conf")
     parser.add_argument('--config-name', help='Name of config file with .postfix', default="hybrid_decode.yaml")
     parser.add_argument('--tsv-dir', help="to override task.label_dir and task.data", default="/home/yfliu/datasets/lrs3/30h_data")
-    parser.add_argument('--ckpt-path', help='finetuned checkpoint path', default="/home/yfliu/output/finetune_hybrid_0.2/checkpoints/checkpoint_best.pt")
-    parser.add_argument('--log-name', help='eval log file and wandb project name', default="decode_hybrid")
-    parser.add_argument('--output', help='output dir without project name', default="/home/yfliu/output")
+    parser.add_argument('--ckpt-path', help='finetuned checkpoint path', default="/home/yfliu/output/finetune_hybrid_spm100/checkpoints/checkpoint_best.pt")
+    parser.add_argument('--finetuned-dir', help='finetune dir where decoding result will be saved', default="/home/yfliu/output/finetune_hybrid_spm100")
     parser.add_argument('--user-dir', help='command-line pwd result')
     parser.add_argument('--modalities', help='shuold be one of "AO", "VO" or "AV".', default="VO")
     args = parser.parse_args()
     args.yaml_path = os.path.join(args.config_dir, args.config_name)
-    args.output = os.path.join(args.output, f'{args.log_name}')
+    args.output = os.path.join(args.finetuned_dir, 'decode', 'hybrid')
     # load args from yaml file using OmegaConf
     args = load_and_ensemble_args(args)
     main(args)

@@ -210,7 +210,7 @@ class SequenceGenerator(nn.Module):
             src_lengths = (
                 (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
             )
-        elif "source" in net_input:
+        elif "source" in net_input:  # our way
             src_tokens = net_input["source"]
             src_lengths = (
                 net_input["padding_mask"].size(-1) - net_input["padding_mask"].sum(-1)

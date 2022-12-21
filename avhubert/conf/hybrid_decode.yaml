@@ -1,10 +1,11 @@
 common:
   user_dir: ???
   log_name: ???  # wandb_project
+  seed: 1
 
 dataset:
   max_tokens: 1000
-  gen_subset: valid
+  gen_subset: test
   num_workers: 0
 
 common_eval:
@@ -18,5 +19,5 @@ override:
 
 generation:
   decodeType: HYBRID
-  beamWidth: 50
+  beamWidth: 5
   Lambda: 0.1

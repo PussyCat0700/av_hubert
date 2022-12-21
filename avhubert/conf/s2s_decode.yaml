@@ -14,7 +14,7 @@ common_eval:
 
 dataset:
   max_tokens: 1000
-  gen_subset: valid
+  gen_subset: test
   num_workers: 0
 
 override:
