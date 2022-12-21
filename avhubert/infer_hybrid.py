@@ -15,8 +15,10 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
+import sys
+sys.path.append("/home/yfliu/av_hubert/fairseq")
+from viterbi import ViterbiDecoder
 from fairseq.data import data_utils
-from error_rate import compute_error_word
 import editdistance
 from decoder import compute_CTC_prob
 
@@ -149,7 +151,13 @@ def inference(model, evalProgress, logger, task, cfg, use_cuda):
     target_dictionary = task.target_dictionary
     spm = task.datasets[cfg.dataset.gen_subset].label_processors[0]
     symbols_to_ignore_spm = {target_dictionary.eos(), target_dictionary.pad()}
-    Lambda = cfg.generation.Lambda
+    decode_type = cfg.generation.decodeType
+    if decode_type == 'hybrid':
+        Lambda = cfg.generation.Lambda
+    elif decode_type == 'greedy':
+        decoder = ViterbiDecoder(target_dictionary)
+    else:
+        raise NotImplementedError(f"decode type {decode_type} not supported.")
     
     model.eval()
     for inputBatch in evalProgress:
@@ -158,8 +166,12 @@ def inference(model, evalProgress, logger, task, cfg, use_cuda):
         if "net_input" not in inputBatch:
             continue
         with torch.no_grad():
-            predictionBatch = inference_hybrid(model, inputBatch, Lambda, cfg.generation.beamWidth,
+            if decode_type == 'hybrid':
+                predictionBatch = inference_hybrid(model, inputBatch, Lambda, cfg.generation.beamWidth,
                                     target_dictionary.eos(), 0, device="cuda" if use_cuda else "cpu")
+            elif decode_type == 'greedy':
+                predictionBatch = decoder.generate([model], inputBatch)
+                predictionBatch = [x[0]['tokens'] for x in predictionBatch]
             predictionBatch = data_utils.collate_tokens(predictionBatch, pad_idx=target_dictionary.pad(), 
                                                         eos_idx=target_dictionary.eos(), left_pad=False)
             for i in range(len(inputBatch["id"])):
@@ -195,7 +207,7 @@ def inference(model, evalProgress, logger, task, cfg, use_cuda):
 def load_and_ensemble_args(args):
     conf = OmegaConf.load(args.yaml_path)
     conf.common.user_dir = args.user_dir
-    conf.common_eval.results_path = os.path.join(args.output, conf.dataset.gen_subset)
+    conf.common_eval.results_path = os.path.join(args.finetuned_dir, 'decode', conf.generation.decodeType, conf.dataset.gen_subset)
     conf.common_eval.path = args.ckpt_path
     conf.override.modalities = []
     if args.modalities != 'AO':
@@ -287,7 +299,6 @@ if __name__ == "__main__":
     parser.add_argument('--modalities', help='shuold be one of "AO", "VO" or "AV".', default="VO")
     args = parser.parse_args()
     args.yaml_path = os.path.join(args.config_dir, args.config_name)
-    args.output = os.path.join(args.finetuned_dir, 'decode', 'hybrid')
     # load args from yaml file using OmegaConf
     args = load_and_ensemble_args(args)
     main(args)

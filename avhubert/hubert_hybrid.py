@@ -333,13 +333,6 @@ class AVHubertHybrid(BaseFairseqModel):
         attn_out = attn_out[0]
         
         return ctc_out, attn_out  # (B, num_classes, T), (B, T, num_classes)
-        #  # for ctc greedy decoding forward
-        # with torch.no_grad():
-        #     output = self.encoder(**kwargs)  # (T, B, C), (B, T), (B, T)
-        # CTCOutputBatch = output['encoder_out'].transpose(0, 1).transpose(1, 2)  # (L,B,dmodel)->(B,dmodel,L)
-        # CTCOutputBatch = self.ctc_output_conv(CTCOutputBatch)  # (B,V,L)
-        # CTCOutputBatch = CTCOutputBatch.transpose(1, 2)  # (B,L,V)
-        # return CTCOutputBatch
 
     def upgrade_state_dict_named(self, state_dict, name):
         super().upgrade_state_dict_named(state_dict, name)

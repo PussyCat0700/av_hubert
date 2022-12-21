@@ -11,7 +11,11 @@ class ViterbiDecoder(BaseDecoder):
         encoder_input: Dict[str, Any],
     ) -> torch.FloatTensor:
         model = models[0]
-        encoder_out = model(**encoder_input)  # (B, T, V)
+        with torch.no_grad():
+            output = model.encoder(**encoder_input)  # (T, B, C), (B, T), (B, T)
+            encoder_out = output['encoder_out'].transpose(0, 1).transpose(1, 2)  # (L,B,dmodel)->(B,dmodel,L)
+            encoder_out = model.ctc_output_conv(encoder_out)  # (B,V,L)
+            encoder_out = encoder_out.transpose(1, 2)  # (B,L,V)
         emissions = torch.nn.functional.log_softmax(encoder_out, dim=-1)
         return emissions.float().cpu().contiguous() # (B, T, V)
     

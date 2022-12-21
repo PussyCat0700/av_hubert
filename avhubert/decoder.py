@@ -315,12 +315,12 @@ def compute_CTC_prob(h, CTCOutLogProbs, T, gamma_n, gamma_b, numBeam, numClasses
     gamma_b[:, 1, :numBeam, 1:eosIx] = -np.inf
     gamma_b[:, 1, :numBeam, eosIx+1:] = -np.inf
 
-    psi = gamma_n[:, 1, :numBeam, 1:-1]  # (6, 50, 998)
+    psi = gamma_n[:, 1, :numBeam, 1:-1]  # (6, 50, 998), 三叉戟
     psi[:, :, 0:sec_left_len] = gamma_n[:, 1, :numBeam, 1:eosIx]
     psi[:, :, sec_left_len:] = gamma_n[:, 1, :numBeam, eosIx+1:]
     for t in range(2, T.max()):
         activeBatch = t < T
-        gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()  # [300, 3]
+        gEndWithc = (g[:, :, :, -1] == c)[:, :, :-1].nonzero()  # [b*beamWidth, 3]
         added_gamma_n = torch.repeat_interleave(gamma_n[:, t - 1, :numBeam, None, 0], numClasses - 1, dim=-1)  # torch.Size([6, beamWidth, 998])
         if len(gEndWithc):
             added_gamma_n.index_put_(tuple(map(torch.stack, zip(*gEndWithc))), torch.tensor(-np.inf).float())  # endwithc的元素被置零，只留下不endwithc的
