@@ -1,11 +1,10 @@
 common:
   user_dir: ???
-  log_name: ???  # wandb_project
   seed: 1
 
 dataset:
   max_tokens: 1000
-  gen_subset: test
+  gen_subset: test  # subset of dataset to be evaled
   num_workers: 0
 
 common_eval:
@@ -18,6 +17,6 @@ override:
   label_dir: ???
 
 generation:
-  decodeType: HYBRID
+  decodeType: hybrid  # should be one of: hybrid, greedy 
   beamWidth: 5
   Lambda: 0.1

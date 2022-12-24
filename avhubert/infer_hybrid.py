@@ -126,7 +126,6 @@ def inference_hybrid(model, inputBatch, Lambda, beamWidth, eosIx, blank=0, devic
         gamma_n[:, :, :, 1:] = -np.inf
         gamma_b[:, :, :, 1:] = -np.inf
 
-    # predictionBatch = model.decoder.embed_tokens(predictionBatch.transpose(0, 1))  # (B, T')--embed-->(T', B, EED)
     predictionBatch = [sorted(Omegahat[b], key=lambda x: x[1], reverse=True)[0][0] for b in range(batch)]  #[([hypo], score)]
     return predictionBatch
 
@@ -293,12 +292,12 @@ if __name__ == "__main__":
     parser.add_argument('--config-dir', help='Config directory', default="/home/yfliu/av_hubert/avhubert/conf")
     parser.add_argument('--config-name', help='Name of config file with .postfix', default="hybrid_decode.yaml")
     parser.add_argument('--tsv-dir', help="to override task.label_dir and task.data", default="/home/yfliu/datasets/lrs3/30h_data")
-    parser.add_argument('--ckpt-path', help='finetuned checkpoint path', default="/home/yfliu/output/finetune_hybrid_spm100/checkpoints/checkpoint_best.pt")
     parser.add_argument('--finetuned-dir', help='finetune dir where decoding result will be saved', default="/home/yfliu/output/finetune_hybrid_spm100")
     parser.add_argument('--user-dir', help='command-line pwd result')
     parser.add_argument('--modalities', help='shuold be one of "AO", "VO" or "AV".', default="VO")
     args = parser.parse_args()
     args.yaml_path = os.path.join(args.config_dir, args.config_name)
+    args.ckpt_path = os.path.join(args.finetuned_dir, "checkpoints", "checkpoint_best.pt")
     # load args from yaml file using OmegaConf
     args = load_and_ensemble_args(args)
     main(args)
